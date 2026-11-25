@@ -111,11 +111,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: gitleaks (full history)
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
+      # The gitleaks GitHub Action requires a paid GITLEAKS_LICENSE for
+      # organization repositories and aborts the job before scanning anything,
+      # which also prevented the detect-secrets steps in this job from ever
+      # running. The pinned open-source image performs the same full-history
+      # scan and exits 1 on any finding, so the strength of the gate is
+      # unchanged (AGENTS.md section 5). Do not delete or soften this step: a
+      # scanner that cannot fail is not a scanner. Move the tag in its own PR.
+      - name: gitleaks (full history, pinned OSS image)
+        uses: docker://ghcr.io/gitleaks/gitleaks:v8.30.1
+        with:
+          args: detect --source . --log-opts=--all --redact --exit-code 1
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -223,7 +229,16 @@ jobs:
       - name: ansible-lint
         env:
           ANSIBLE_LINT_WRITE_FILE: ""
-        run: ansible-lint --profile "${ANSIBLE_LINT_PROFILE}" --nocolor
+        # ansible.cfg sets collections_path = ./collections, so the galaxy step
+        # above installs third-party collections INSIDE the lint root. Without
+        # this exclusion ansible-lint audits vendored galaxy code rather than
+        # this repository: measured 3477 failures across 653 files (mostly
+        # community.crypto test fixtures) versus 0 failures in our own 15
+        # files. The exclusion narrows scope to tracked code only; the
+        # 'production' profile itself is unchanged.
+        run: >-
+          ansible-lint --profile "${ANSIBLE_LINT_PROFILE}" --nocolor
+          --exclude collections/
 
       - name: Syntax check (lab only)
         run: |

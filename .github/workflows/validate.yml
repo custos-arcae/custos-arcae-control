@@ -1,0 +1,310 @@
+# validate.yml
+#
+# PR-only validation workflow for custos-arcae-control.
+#
+# Hard rules (see AGENTS.md §5):
+#   * Runs on `pull_request` only. Never on `push` to main, never on schedule.
+#   * Has NO access to production credentials. No `secrets.*` beyond
+#     `GITHUB_TOKEN` (default, read-only for PRs from forks).
+#   * Never executes playbooks against `inventories/production/**`.
+#   * Fails the build on any secret-scan finding.
+#
+# If a check must be relaxed, do it via an ADR, not by editing this file.
+
+name: validate
+
+on:
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same PR to save CI minutes.
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Pin the Python used for linting tools. Kept in sync with pyproject.toml.
+  PYTHON_VERSION: "3.12"
+  ANSIBLE_VERSION: "10.5.0"   # ansible-core 2.17.x — bump via ADR only
+  ANSIBLE_LINT_PROFILE: "production"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Guard rails: refuse to run if the diff touches production inventory
+  #    without a matching change plan. This is a policy check, not a substitute
+  #    for CODEOWNERS review.
+  # ---------------------------------------------------------------------------
+  change-scope:
+    name: Change scope guard
+    runs-on: ubuntu-24.04
+    outputs:
+      touches_production: ${{ steps.scope.outputs.touches_production }}
+      touches_ansible: ${{ steps.scope.outputs.touches_ansible }}
+      touches_inventory: ${{ steps.scope.outputs.touches_inventory }}
+      touches_python: ${{ steps.scope.outputs.touches_python }}
+      touches_ci: ${{ steps.scope.outputs.touches_ci }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed paths
+        id: scope
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          CHANGED="$(git diff --name-only "$BASE" "$HEAD")"
+          echo "$CHANGED" | sed 's/^/  /'
+
+          has() { echo "$CHANGED" | grep -Eq "$1"; }
+
+          echo "touches_production=$(has '^inventories/production/' && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "touches_ansible=$(has '^(ansible/|provisioning/)' && echo true || echo false)"       >> "$GITHUB_OUTPUT"
+          # Inventory-only PRs must still run Ansible inventory validation +
+          # syntax, so they are classified separately from ansible/ changes.
+          echo "touches_inventory=$(has '^inventories/' && echo true || echo false)"               >> "$GITHUB_OUTPUT"
+          echo "touches_python=$(has '^(src/|tests/|pyproject\.toml|main\.py)' && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "touches_ci=$(has '^(\.github/|\.yamllint)' && echo true || echo false)"            >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install pytest (change-plan self-test)
+        run: pip install 'pytest>=8.0'
+
+      # Always run the change-plan self-test so a regression in the guard is
+      # caught even on PRs that do not touch production inventory.
+      - name: Change-plan guard self-test (fake fixtures)
+        run: pytest tests/test_ci_scripts.py -o addopts="" -q -k change_plan
+
+      # Hardened check: the PR must ADD or MODIFY a change plan that covers the
+      # affected production assets AND declares the proposed action's class.
+      # Deleted, missing, cancelled or unrelated plans are rejected. This is a
+      # repository-level guard only; human approval is enforced by CODEOWNERS +
+      # branch protection (see AGENTS.md §5.1 Authorization enforcement model).
+      - name: Require a covering change plan for production changes
+        if: steps.scope.outputs.touches_production == 'true'
+        run: |
+          set -euo pipefail
+          python .github/scripts/check_change_plan.py \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --head "${{ github.event.pull_request.head.sha }}"
+          echo "See AGENTS.md §6 — a covering change plan is mandatory for production-affecting changes."
+
+  # ---------------------------------------------------------------------------
+  # 2. Secret scanning. Non-negotiable. Fails on any finding.
+  # ---------------------------------------------------------------------------
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-24.04
+    needs: change-scope
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: gitleaks (full history)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install detect-secrets + pytest
+        # Pinned to the exact version that resolves from the CI package
+        # source (PyPI) and that this repository was validated against.
+        # An unpinned range makes the finding set depend on whatever
+        # detect-secrets happens to publish next: a future keyword-denylist
+        # addition could turn a clean tree red (or, worse, a removal could
+        # hide a new finding). 1.5.0 is the current newest release on PyPI;
+        # the annotations in this PR are complete FOR 1.5.0. Bump via ADR
+        # and re-run the tracked-file scan when the pin moves.
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet --upgrade pip
+          pip install --quiet 'detect-secrets==1.5.0' 'pytest>=8.0'
+
+      # Prove the guard itself works before trusting it: clean -> pass,
+      # findings -> fail, scanner error (non-zero exit / empty / bad JSON) ->
+      # fail. Uses fake fixtures, never the real scanner.
+      - name: detect-secrets guard self-test (clean/findings/scanner-error)
+        run: pytest tests/test_ci_scripts.py -o addopts="" -q -k detect_secrets
+
+      # The baseline file is intentionally absent: this repository must contain
+      # zero known secrets. The helper script fails the job on ANY finding AND
+      # on any scanner error (the previous inline `if ... then echo ok` form
+      # swallowed both, so findings and crashes passed silently).
+      - name: detect-secrets (working tree)
+        run: python .github/scripts/detect_secrets_check.py
+
+  # ---------------------------------------------------------------------------
+  # 3. YAML / structure validation.
+  # ---------------------------------------------------------------------------
+  yaml:
+    name: YAML & structure
+    runs-on: ubuntu-24.04
+    needs: change-scope
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install yamllint
+        run: pip install 'yamllint>=1.35'
+
+      - name: yamllint (Ansible + inventories + workflows)
+        run: |
+          set -euo pipefail
+          yamllint -c .yamllint.yml \
+            ansible/ inventories/ .github/workflows/ provisioning/
+
+      - name: Reject plaintext secrets in inventory
+        run: |
+          set -euo pipefail
+          # Any ansible_password / ansible_ssh_pass / api_token with a
+          # non-Vault, non-lookup value is a hard failure.
+          if grep -RnE '^\s*(ansible_(password|ssh_pass|become_pass)|.*_api_token|.*_secret)\s*:\s*[^!\s]' \
+               inventories/ ; then
+            echo "::error::Plaintext credential variable detected in inventories/. Use !vault or lookup() only."
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # 4. Ansible lint + syntax + offline fixture run. Never touches a device or
+  #    production inventory, and makes no network calls to iDRAC (the offline
+  #    seam plus ansible_connection=local guarantee this).
+  # ---------------------------------------------------------------------------
+  ansible:
+    name: Ansible lint & offline checks
+    runs-on: ubuntu-24.04
+    needs: [change-scope, yaml]
+    # Runs for ansible/provisioning changes AND for inventory-only changes, so
+    # an inventory PR still gets inventory validation + syntax + offline checks.
+    if: >-
+      needs.change-scope.outputs.touches_ansible == 'true' ||
+      needs.change-scope.outputs.touches_inventory == 'true'
+    defaults:
+      run:
+        working-directory: ansible
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Ansible & lint
+        run: |
+          set -euo pipefail
+          pip install --upgrade pip
+          pip install "ansible==${ANSIBLE_VERSION}" 'ansible-lint>=24.0' yamllint 'pytest>=8.0'
+
+      - name: Install galaxy requirements
+        run: ansible-galaxy install -r requirements.yml
+
+      - name: ansible-lint
+        env:
+          ANSIBLE_LINT_WRITE_FILE: ""
+        run: ansible-lint --profile "${ANSIBLE_LINT_PROFILE}" --nocolor
+
+      - name: Syntax check (lab only)
+        run: |
+          set -euo pipefail
+          for pb in playbooks/*.yml; do
+            echo "::group::syntax: $pb"
+            ansible-playbook -i ../inventories/lab/hosts.yml --syntax-check "$pb"
+            echo "::endgroup::"
+          done
+
+      - name: Validate lab + offline inventory parse and groups resolve
+        run: |
+          set -euo pipefail
+          ansible-inventory -i ../inventories/lab/hosts.yml --graph
+          ansible-inventory -i ../inventories/lab/hosts.yml --list > /tmp/lab-inventory.json
+          ansible-inventory -i tests/offline/inventory.yml --graph
+
+      - name: Offline fixture run of dell_host_baseline (no device contact)
+        # Replaces the old hosted-runner "dry-run against lab", which reached
+        # out to unreachable iDRAC addresses (198.51.100.x) because the role's
+        # read-only info tasks set check_mode:false. The offline fixture
+        # inventory sets dell_host_baseline_offline=true and
+        # ansible_connection=local, so the role exercises its local
+        # authorization / drift / storage-contract / audit logic with zero
+        # network calls and no privilege escalation.
+        env:
+          ANSIBLE_BECOME_ASK_PASS: "False"
+        run: |
+          set -euo pipefail
+          ansible-playbook -i tests/offline/inventory.yml \
+            tests/offline/baseline-offline.yml --syntax-check
+          ansible-playbook -i tests/offline/inventory.yml \
+            tests/offline/baseline-offline.yml
+
+      # Playbook-level regression tests. These drive the REAL operator entry
+      # point (playbooks/baseline-hosts.yml) and the firmware catalogue verifier
+      # against offline fixtures. They need ansible-playbook on PATH, so they
+      # run here (the Python job skips the entry-point tests). They prove that
+      # an invalid inventory or an unauthorized production scope stops BEFORE
+      # any remote connection (unreachable=0), and that no rejected catalogue
+      # can reach the idrac_firmware submit task. No device is contacted.
+      - name: Entry-point preflight + firmware catalogue regression tests
+        working-directory: ${{ github.workspace }}
+        env:
+          ANSIBLE_BECOME_ASK_PASS: "False"
+        run: |
+          set -euo pipefail
+          pytest tests/test_entrypoint_preflight.py tests/test_firmware_catalogue.py \
+            -o addopts="" -q
+
+  # ---------------------------------------------------------------------------
+  # 5. Python package checks (only when Python paths change).
+  # ---------------------------------------------------------------------------
+  python:
+    name: Python lint & tests
+    runs-on: ubuntu-24.04
+    needs: change-scope
+    if: needs.change-scope.outputs.touches_python == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install package with dev extras
+        run: |
+          set -euo pipefail
+          pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: ruff check
+        run: ruff check src/ tests/
+
+      - name: ruff format --check
+        run: ruff format --check src/ tests/
+
+      - name: mypy
+        run: mypy src/
+
+      - name: pytest
+        run: pytest

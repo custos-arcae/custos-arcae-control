@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SYNTHETIC test fixture: an APPROVED Dell firmware catalogue.
+
+  NOT a real Dell Catalog.xml. It mirrors the documented Dell "Manifest" schema
+  shape (<SoftwareComponent> with <Name><Display>, <Version><Display>,
+  <DellVersion>, and a `path` package identity) so the verification script's
+  parsing and matching logic can be exercised offline. The component-name to
+  idrac_firmware_info ElementName mapping is model-specific and MUST be
+  confirmed against a real catalogue in lab before firmware apply is enabled.
+
+  Versions here match ansible/tests/offline/inventory.yml
+  dell_host_baseline_fixture_firmware, so an approved run reports no drift.
+-->
+<Manifest>
+  <Release>
+    <Name><Display lang="en">Custos ARCAE lab firmware baseline</Display></Name>
+    <Version><Display>2026.11</Display></Version>
+  </Release>
+  <SoftwareComponent componentID="1001" componentType="BIOS" path="FOLDER0001/BIOS-2.11.2.exe" releaseID="R1">
+    <Name><Display lang="en">BIOS</Display></Name>
+    <Version><Display>2.11.2</Display></Version>
+    <DellVersion><Display>A05</Display></DellVersion>
+  </SoftwareComponent>
+  <SoftwareComponent componentID="1002" componentType="FRMW" path="FOLDER0002/iDRAC-6.00.02.00.exe" releaseID="R2">
+    <Name><Display lang="en">iDRAC9 Firmware</Display></Name>
+    <Version><Display>6.00.02.00</Display></Version>
+    <DellVersion><Display>A00</Display></DellVersion>
+  </SoftwareComponent>
+  <SoftwareComponent componentID="1003" componentType="FRMW" path="FOLDER0003/LC-5.10.10.00.exe" releaseID="R3">
+    <Name><Display lang="en">Lifecycle Controller</Display></Name>
+    <Version><Display>5.10.10.00</Display></Version>
+    <DellVersion><Display>A00</Display></DellVersion>
+  </SoftwareComponent>
+  <SoftwareComponent componentID="1004" componentType="FRMW" path="FOLDER0004/PERC-5.11.0-0004.exe" releaseID="R4">
+    <Name><Display lang="en">PERC H755 Firmware</Display></Name>
+    <Version><Display>5.11.0-0004</Display></Version>
+    <DellVersion><Display>A02</Display></DellVersion>
+  </SoftwareComponent>
+  <SoftwareComponent componentID="1005" componentType="FRMW" path="FOLDER0005/NIC-22.9.7.exe" releaseID="R5">
+    <Name><Display lang="en">Broadcom NIC Firmware</Display></Name>
+    <Version><Display>22.9.7</Display></Version>
+    <DellVersion><Display>A11</Display></DellVersion>
+  </SoftwareComponent>
+</Manifest>

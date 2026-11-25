@@ -1,0 +1,84 @@
+# Lab group_vars for the dell_hosts group.
+#
+# Supplies the site-specific values the dell_host_baseline role needs. The role
+# defaults (ansible/roles/dell_host_baseline/defaults/main.yml) define the
+# SHAPE of the contract; this file defines the lab VALUES.
+#
+# Compliance: no secret material here. The iDRAC CA certificate path points at
+# a public certificate (not a key). Firmware share credentials are referenced
+# by env-var NAME only.
+
+---
+# --- Trusted iDRAC TLS verification (mandatory) -----------------------------
+# The role asserts this is non-empty and passes validate_certs=true on every
+# iDRAC call. Point it at the site CA bundle or the pinned iDRAC self-signed
+# certificate for the lab. A certificate (public) may be committed; a private
+# key may not.
+#
+# TODO(hardware-owners): replace with the real lab iDRAC CA/cert path once the
+# lab iDRAC certificates are issued. Until then the role fails fast on any
+# iDRAC contact, which is the intended safe behaviour for CI dry-runs.
+dell_host_baseline_idrac_ca_path: ""
+
+# --- Hardware validation gate -----------------------------------------------
+# Stays false until the lab hardware-validation test in
+# docs/runbooks/commission-dell-host.md §"Hardware validation required" is
+# completed for the exact PowerEdge model and PERC controller. While false,
+# firmware and RAID apply are refused even if their own gates are set.
+dell_host_baseline_hardware_validated: false
+
+# --- Firmware repository share (must be reachable BY THE iDRAC) -------------
+# idrac_firmware 9.7.0 makes the iDRAC pull the repository itself, so this is
+# a network share, not a control-node path. Lab uses a local HTTP mirror.
+#
+# TODO(hardware-owners): set name to the lab firmware mirror URL and sha256 to
+# the digest of the tested Catalog.xml before enabling firmware apply.
+dell_host_baseline_firmware_share:
+  name: ""                       # e.g. "http://firmware.lab.test/dell"
+  user_var: ""                   # CIFS only: env var NAME for share user
+  password_var: ""               # CIFS only: env var NAME for share password
+  mnt: ""                        # NFS/CIFS only: control-node mount for verify
+
+dell_host_baseline_firmware_catalogue:
+  file_name: Catalog.xml
+  sha256: ""                     # 64-char lowercase hex of the tested catalogue
+
+# --- Firmware baseline targets ----------------------------------------------
+# Pinned versions come from the lab test evidence attached to the change plan.
+# Empty target_version blocks firmware apply (asserted by the role).
+# `component` must match an ElementName reported by idrac_firmware_info.
+#
+# TODO(hardware-owners): fill target_version and current_version_floor from the
+# tested Dell catalogue for the exact lab PowerEdge model.
+dell_host_baseline_firmware_targets:
+  - component: BIOS
+    target_version: ""
+    current_version_floor: ""
+    requires_reboot: true
+    recovery: "Dell BIOS recovery via USB (vendor KB)"
+  - component: iDRAC
+    target_version: ""
+    current_version_floor: ""
+    requires_reboot: false
+    recovery: "iDRAC reset to defaults + re-apply baseline"
+  - component: LifecycleController
+    target_version: ""
+    current_version_floor: ""
+    requires_reboot: true
+    recovery: "Re-run baseline after iDRAC recovery"
+  - component: PERC
+    target_version: ""
+    current_version_floor: ""
+    requires_reboot: true
+    recovery: "Controller firmware rollback via LifecycleController"
+  - component: NIC
+    target_version: ""
+    current_version_floor: ""
+    requires_reboot: true
+    recovery: "Re-flash from vendor image via iDRAC"
+
+# --- iDRAC settings baseline -------------------------------------------------
+# Attribute names are iDRAC-version specific. idrac_attributes fails loudly on
+# any name the target iDRAC rejects, so confirm these against the lab iDRAC
+# firmware version before enabling dell_host_baseline_apply_idrac in production.
+dell_host_baseline_apply_idrac: false

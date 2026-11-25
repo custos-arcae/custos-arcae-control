@@ -1,0 +1,99 @@
+# ansible/roles/dell_host_baseline/tasks/idrac.yml
+#
+# iDRAC settings baseline. Included from tasks/main.yml ONLY when:
+#   * dell_host_baseline_apply       == true
+#   * dell_host_baseline_apply_idrac == true
+#
+# WHY NOT idrac_server_config_profile?
+# ------------------------------------
+# Audited against dellemc.openmanage==9.7.0: idrac_server_config_profile has
+# NO `attributes` and NO `share_parameters` parameter; its operation selector
+# is `command` (import/export/preview/..., default export) and `job_wait` is
+# REQUIRED. It imports/exports a whole Server Configuration Profile, it does
+# not set individual attributes. Passing `attributes:` to it is an invalid
+# parameter and the module rejects it. The correct modules for a per-attribute
+# baseline are:
+#   * idrac_attributes      (idrac_attributes / system_attributes /
+#                            lifecycle_controller_attributes dicts)
+#   * idrac_timezone_ntp    (setup_idrac_timezone, enable_ntp, ntp_server_1..3)
+#   * idrac_syslog          (syslog: Enabled/Disabled)
+#
+# TLS: validate_certs=true and ca_path are mandatory on every call.
+#
+# SAFETY: idrac_attributes calls fail_json(invalid_attributes=...) when the
+# target iDRAC rejects an attribute name or value (audited:
+# plugins/modules/idrac_attributes.py). The role additionally asserts the
+# returned invalid_attributes map is empty so a partially-applied baseline is
+# never recorded as success.
+
+---
+- name: Apply iDRAC general attributes
+  dellemc.openmanage.idrac_attributes:
+    idrac_ip: "{{ oob_controller.address }}"
+    idrac_user: "{{ dell_host_baseline_oob_username }}"
+    idrac_password: "{{ dell_host_baseline_oob_password }}"
+    validate_certs: true
+    ca_path: "{{ dell_host_baseline_idrac_ca_path }}"
+    timeout: "{{ dell_host_baseline_idrac_timeout }}"
+    idrac_attributes: "{{ dell_host_baseline_idrac.attributes }}"
+    system_attributes: "{{ dell_host_baseline_idrac.system_attributes }}"
+    lifecycle_controller_attributes: "{{ dell_host_baseline_idrac.lifecycle_controller_attributes }}"
+  delegate_to: localhost
+  register: dell_host_baseline_idrac_attributes_result
+  no_log: true
+  notify: restart idrac
+
+- name: Fail if the iDRAC rejected any attribute
+  ansible.builtin.assert:
+    that:
+      - (dell_host_baseline_idrac_attributes_result.invalid_attributes | default({})) | length == 0
+    fail_msg: >-
+      The iDRAC rejected one or more baseline attributes on
+      {{ inventory_hostname }} ({{ asset_id }}):
+      {{ dell_host_baseline_idrac_attributes_result.invalid_attributes | default({}) }}.
+      Attribute names are iDRAC-version specific. Do not record success.
+      Confirm the attribute registry for this iDRAC firmware version in lab
+      (see docs/runbooks/commission-dell-host.md §"Hardware validation
+      required") and correct dell_host_baseline_idrac.attributes.
+    quiet: true
+
+- name: Apply iDRAC timezone and NTP
+  dellemc.openmanage.idrac_timezone_ntp:
+    idrac_ip: "{{ oob_controller.address }}"
+    idrac_user: "{{ dell_host_baseline_oob_username }}"
+    idrac_password: "{{ dell_host_baseline_oob_password }}"
+    validate_certs: true
+    ca_path: "{{ dell_host_baseline_idrac_ca_path }}"
+    timeout: "{{ dell_host_baseline_idrac_timeout }}"
+    setup_idrac_timezone: "{{ dell_host_baseline_idrac.timezone }}"
+    enable_ntp: "{{ dell_host_baseline_idrac.enable_ntp }}"
+    ntp_server_1: "{{ (dell_host_baseline_idrac.ntp_servers | list)[0] | default(omit, true) }}"
+    ntp_server_2: "{{ (dell_host_baseline_idrac.ntp_servers | list)[1] | default(omit, true) }}"
+    ntp_server_3: "{{ (dell_host_baseline_idrac.ntp_servers | list)[2] | default(omit, true) }}"
+  delegate_to: localhost
+  register: dell_host_baseline_idrac_timezone_result
+  no_log: true
+  notify: restart idrac
+
+- name: Apply iDRAC syslog forwarding state
+  dellemc.openmanage.idrac_syslog:
+    idrac_ip: "{{ oob_controller.address }}"
+    idrac_user: "{{ dell_host_baseline_oob_username }}"
+    idrac_password: "{{ dell_host_baseline_oob_password }}"
+    validate_certs: true
+    ca_path: "{{ dell_host_baseline_idrac_ca_path }}"
+    timeout: "{{ dell_host_baseline_idrac_timeout }}"
+    syslog: "{{ 'Enabled' if dell_host_baseline_idrac.syslog_enabled else 'Disabled' }}"
+  delegate_to: localhost
+  register: dell_host_baseline_idrac_syslog_result
+  no_log: true
+  notify: restart idrac
+
+- name: Report iDRAC baseline applied
+  ansible.builtin.debug:
+    msg: >-
+      iDRAC baseline applied to {{ inventory_hostname }} ({{ asset_id }}):
+      attributes, timezone/NTP and syslog forwarded. The syslog SERVER target
+      is set separately via idrac_attributes from
+      {{ dell_host_baseline_idrac.syslog_target_var }}.
+  changed_when: false

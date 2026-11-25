@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SYNTHETIC fixture: an AMBIGUOUS catalogue. Two BIOS entries advertise
+     different versions (2.11.2 and 2.9.0). The iDRAC could consume either, so
+     the script must reject the ambiguity rather than guess. -->
+<Manifest>
+  <SoftwareComponent componentID="1001" componentType="BIOS" path="FOLDER0001/BIOS-2.11.2.exe">
+    <Name><Display lang="en">BIOS</Display></Name>
+    <Version><Display>2.11.2</Display></Version>
+  </SoftwareComponent>
+  <SoftwareComponent componentID="1002" componentType="BIOS" path="FOLDER0006/BIOS-2.9.0.exe">
+    <Name><Display lang="en">BIOS</Display></Name>
+    <Version><Display>2.9.0</Display></Version>
+  </SoftwareComponent>
+  <SoftwareComponent componentID="1003" componentType="FRMW" path="FOLDER0002/iDRAC-6.00.02.00.exe">
+    <Name><Display lang="en">iDRAC9 Firmware</Display></Name>
+    <Version><Display>6.00.02.00</Display></Version>
+  </SoftwareComponent>
+  <SoftwareComponent componentID="1004" componentType="FRMW" path="FOLDER0003/LC-5.10.10.00.exe">
+    <Name><Display lang="en">Lifecycle Controller</Display></Name>
+    <Version><Display>5.10.10.00</Display></Version>
+  </SoftwareComponent>
+  <SoftwareComponent componentID="1005" componentType="FRMW" path="FOLDER0004/PERC-5.11.0-0004.exe">
+    <Name><Display lang="en">PERC H755 Firmware</Display></Name>
+    <Version><Display>5.11.0-0004</Display></Version>
+  </SoftwareComponent>
+  <SoftwareComponent componentID="1006" componentType="FRMW" path="FOLDER0005/NIC-22.9.7.exe">
+    <Name><Display lang="en">Broadcom NIC Firmware</Display></Name>
+    <Version><Display>22.9.7</Display></Version>
+  </SoftwareComponent>
+</Manifest>

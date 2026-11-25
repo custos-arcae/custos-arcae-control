@@ -1,0 +1,255 @@
+# ansible/roles/dell_host_baseline/defaults/main.yml
+#
+# Default variables for the Dell host baseline role. Every value here is a
+# SAFE default: it does not mutate firmware, does not reboot, and does not
+# touch RAID. Operators opt in to destructive behaviour via inventory or
+# -e flags, never by editing this file.
+#
+# Site-specific overrides live in inventory group_vars/host_vars. Do not add
+# site values here.
+#
+# API CONTRACT
+# ------------
+# All module names, parameters and return fields below are audited against
+# dellemc.openmanage==9.7.0 (see ansible/requirements.yml). The collection's
+# iDRAC modules share the auth argspec: idrac_ip, idrac_user, idrac_password,
+# validate_certs, ca_path, timeout (plugins/module_utils/idrac_redfish.py and
+# dellemc_idrac.py). Do not pass parameters that are not in the 9.7.0
+# DOCUMENTATION block for the target module — the module will reject them.
+
+---
+# --- Role identity -----------------------------------------------------------
+dell_host_baseline_role_version: "2.0.0"
+
+# --- Offline testing seam ----------------------------------------------------
+# When true the role makes NO remote iDRAC calls. Firmware and storage facts
+# are taken from the fixture variables below so CI can exercise the local
+# logic (authorization asserts, drift computation, audit events) without a
+# device. Offline mode is a TEST affordance only: it is mutually exclusive
+# with any apply gate (asserted in tasks/main.yml) and defaults to false.
+# Never set this true outside CI/test inventories.
+dell_host_baseline_offline: false
+dell_host_baseline_fixture_firmware: {}
+# Shape mirrors idrac_storage_volume state=view storage_status, keyed by the
+# inventory storage role name (boot/data).
+dell_host_baseline_fixture_storage: {}
+
+# --- Execution gates ---------------------------------------------------------
+# Master switch. When false the role only gathers facts and reports drift.
+# CI and laptop dry-runs use this.
+dell_host_baseline_apply: false
+
+# HARDWARE VALIDATION GATE.
+# Firmware and RAID mutation cannot be validated offline. Until the exact
+# PowerEdge model, PERC controller, disk IDs and recovery procedure have been
+# validated on real hardware in lab (see docs/runbooks/commission-dell-host.md
+# §"Hardware validation required"), this stays false and the role FAILS if a
+# firmware or storage apply is attempted. This is deliberate: an unvalidated
+# firmware/RAID path is a brick risk, not a convenience.
+dell_host_baseline_hardware_validated: false
+
+# Firmware update gate. Requires apply + hardware_validated + a pinned
+# catalogue + non-empty target versions + an iDRAC-reachable share.
+dell_host_baseline_apply_firmware: false
+
+# Reboots are never implicit. The playbook must pass
+# -e dell_host_baseline_allow_reboot=true AND the change plan must name the
+# reboot as an expected step. Checked BEFORE a firmware update is submitted,
+# not after, because a submitted update that needs activation is already a
+# committed reboot.
+dell_host_baseline_allow_reboot: false
+
+# iDRAC settings baseline gate (attributes, NTP, syslog). Non-destructive but
+# still a mutation, so it is gated separately from firmware/storage.
+dell_host_baseline_apply_idrac: false
+
+# RAID configuration is destructive by definition. The role will only VERIFY
+# the layout matches inventory unless ALL of these are true:
+#   apply + hardware_validated + apply_storage + disks_confirmed_empty.
+dell_host_baseline_apply_storage: false
+dell_host_baseline_storage_disks_confirmed_empty: false
+
+# --- TLS verification (mandatory) -------------------------------------------
+# iDRAC ships a self-signed certificate, but "self-signed" is not "unverified".
+# The site CA / pinned iDRAC certificate must be provided so the control node
+# can verify the iDRAC TLS identity. validate_certs is therefore true and
+# ca_path is REQUIRED for every iDRAC call. A missing ca_path fails the role
+# rather than silently downgrading to no verification (MITM on the management
+# network is in the threat model — see ansible.cfg).
+dell_host_baseline_idrac_ca_path: ""
+dell_host_baseline_idrac_tls_min_version: "1.2"
+dell_host_baseline_idrac_timeout: 60
+
+# --- Firmware baseline -------------------------------------------------------
+# Pinned catalogue versions. Bumping any of these is a change-plan event:
+# the operator must confirm the vendor-supported recovery path for the exact
+# version (see docs/runbooks/commission-dell-host.md §Recovery).
+#
+# Values below are the shape of the contract, not real versions. The site
+# change plan supplies the actual pinned versions from the Dell catalogue
+# that was tested in lab.
+#
+# SHARE MODEL (audited against idrac_firmware 9.7.0):
+#   idrac_firmware.short_description = "Firmware update from a repository on a
+#   network share (CIFS, NFS, HTTP, HTTPS, FTP)". `share_name` is REQUIRED and
+#   must be reachable BY THE iDRAC, not by the control node. A control-node
+#   local path (e.g. /tmp/...) is INVALID — the iDRAC pulls the catalogue and
+#   packages itself. Supply an HTTP(S)/NFS/CIFS share the iDRAC can reach.
+dell_host_baseline_firmware_share:
+  # Examples: "http://firmware.lab.test/dell", "192.0.2.50:/srv/dell-catalog",
+  #           "//files.lab.test/dell" (CIFS, needs share_user/share_password)
+  name: ""
+  # Optional CIFS credentials — resolved from env var NAMES, never values.
+  user_var: ""
+  password_var: ""
+  mnt: ""
+
+dell_host_baseline_firmware_catalogue:
+  # Catalogue file name on the share (idrac_firmware.catalog_file_name).
+  file_name: Catalog.xml
+  # SHA-256 of the tested Catalog.xml, used to verify the share content before
+  # the iDRAC pulls it. Empty blocks firmware apply.
+  sha256: ""
+
+# SOURCE-VERIFIED ATTESTATION GATE.
+# The iDRAC pulls <share>/Catalog.xml AND every package it references ON ITS
+# OWN (audited: idrac_firmware 9.7.0 routes http(s)/ftp via urlparse and
+# CIFS/NFS via FileOnShare; LC errors SYS226/SYS252 reference
+# Catalog/Catalog.xml). The control node therefore cannot prove the bytes the
+# iDRAC downloads are the bytes it verified. Consequences:
+#   * HTTPS is the only fully source-verifiable transport (control node and
+#     iDRAC authenticate the same TLS server identity) and needs no attestation.
+#   * HTTP/NFS/CIFS can be content-verified on the control node but leave an
+#     identity gap; verify_firmware_catalogue.py REJECTS them unless this flag
+#     is true. Set it true ONLY with the evidence named in the runbook
+#     (isolated management VLAN, read-only export, control node and iDRAC read
+#     the same artifact).
+#   * FTP/TFTP/local/unknown are NEVER permitted regardless of this flag.
+# Firmware apply is disabled by default; this flag alone does not enable it.
+dell_host_baseline_firmware_source_verified: false
+
+dell_host_baseline_firmware_targets:
+  # Each entry: {component, target_version, current_version_floor, recovery,
+  #              requires_reboot}
+  # `component` must match an ElementName/FQDD substring reported by
+  # idrac_firmware_info (firmware_info.Firmware[].ElementName).
+  # `requires_reboot` drives the pre-submit reboot-authorization check.
+  - component: BIOS
+    target_version: ""
+    current_version_floor: ""
+    requires_reboot: true
+    recovery: "Dell BIOS recovery via USB (vendor KB)"
+  - component: iDRAC
+    target_version: ""
+    current_version_floor: ""
+    requires_reboot: false   # iDRAC firmware activates via idrac_reset, not host reboot
+    recovery: "iDRAC reset to defaults + re-apply baseline"
+  - component: LifecycleController
+    target_version: ""
+    current_version_floor: ""
+    requires_reboot: true
+    recovery: "Re-run baseline after iDRAC recovery"
+  - component: PERC
+    target_version: ""
+    current_version_floor: ""
+    requires_reboot: true
+    recovery: "Controller firmware rollback via LifecycleController"
+  - component: NIC
+    target_version: ""
+    current_version_floor: ""
+    requires_reboot: true
+    recovery: "Re-flash from vendor image via iDRAC"
+
+# --- iDRAC baseline settings -------------------------------------------------
+# Applied via the dedicated 9.7.0 modules, NOT via idrac_server_config_profile
+# (which is for whole-SCP import/export and has no `attributes` parameter):
+#   * idrac_attributes      -> idrac_attributes / system_attributes /
+#                              lifecycle_controller_attributes dicts
+#   * idrac_timezone_ntp    -> setup_idrac_timezone, enable_ntp, ntp_server_1..3
+#   * idrac_syslog          -> syslog: Enabled/Disabled
+#
+# ATTRIBUTE NAME FORMAT (audited against idrac_attributes EXAMPLES):
+#   Group.Instance.Attribute  (DOT separated, e.g. "SNMP.1.AgentCommunity",
+#   "EmailAlert.1.Enable", "LCAttributes.1.AutoUpdate"). The SCP/XML "#" form
+#   (e.g. "WebServer.1#TLSProtocol") is NOT accepted by idrac_attributes.
+#   idrac_attributes calls fail_json(invalid_attributes=...) on any name or
+#   value the target iDRAC rejects, so a wrong name fails loudly. The exact
+#   attribute registry is iDRAC-version specific and MUST be confirmed in lab
+#   before apply_idrac is enabled in production.
+dell_host_baseline_idrac:
+  # NTP / timezone (idrac_timezone_ntp)
+  timezone: "{{ custos_timezone | default('Europe/Vilnius') }}"
+  enable_ntp: "Enabled"
+  ntp_servers: "{{ custos_ntp_servers | default([]) }}"
+
+  # Syslog forwarding (idrac_syslog toggles enable/disable; the syslog SERVER
+  # target is an iDRAC attribute set via idrac_attributes below).
+  syslog_enabled: true
+
+  # Security/audit attributes (idrac_attributes.idrac_attributes).
+  # Names below are the documented iDRAC9 attribute-registry style; confirm
+  # against the target iDRAC version in lab (see runbook §Hardware validation).
+  attributes:
+    # Disable IPMI over LAN (long vulnerability history).
+    "IPMI.1.Enable": "Disabled"
+    # Enable serial-over-LAN for the break-glass console path.
+    "SerialRedirection.1.Enable": "Enabled"
+    # TLS floor. Attribute name is iDRAC-version specific; verified in lab.
+    "WebServer.1.TLSProtocol": "{{ dell_host_baseline_idrac_tls_min_version }}"
+  # Attributes that must NOT be silently accepted: the role asserts the module
+  # returned an empty invalid_attributes map.
+  system_attributes: {}
+  lifecycle_controller_attributes:
+    # Disable Lifecycle Controller auto-update so firmware only changes via
+    # this controlled path.
+    "LCAttributes.1.AutoUpdate": "Disabled"
+
+  # Syslog server target (site-specific). Resolved from an env var NAME.
+  syslog_target_var: CUSTOS_SIEM_SYSLOG_TARGET
+
+# --- Host OS baseline --------------------------------------------------------
+# Applied over SSH to the host OS (Proxmox VE or the installer's minimal
+# Linux). Kept deliberately small: the proxmox_ve role owns the rest.
+dell_host_baseline_host_os:
+  packages_present:
+    - srvadmin-all         # Dell OpenManage Server Administrator (omreport)
+    - smartmontools
+    - lsscsi
+    - nvme-cli
+    - ethtool
+  packages_absent:
+    - telnetd
+    - rsh-server
+  services_enabled:
+    - ntpsec               # or chrony, depending on the OS release
+  sysctl:
+    # Kernel hardening baselined here so it survives a Proxmox reinstall.
+    net.ipv4.conf.all.rp_filter: 1
+    net.ipv4.conf.default.rp_filter: 1
+    net.ipv4.icmp_ignore_bogus_error_responses: 1
+    kernel.kptr_restrict: 2
+    kernel.dmesg_restrict: 1
+    kernel.unprivileged_bpf_disabled: 1
+    net.core.bpf_jit_harden: 2
+
+# --- Storage baseline (verification only by default) -------------------------
+# AUDITED against idrac_storage_volume 9.7.0:
+#   * RAID level param is `volume_type` with SPACED values: 'RAID 0','RAID 1',
+#     'RAID 5','RAID 6','RAID 10','RAID 50','RAID 60'. There is NO `raid_type`.
+#   * Disks are selected via the `volumes` list (each: name, drives{id:[...]}
+#     or drives{location:[...]}), NOT a top-level `drive_list`. There is NO
+#     `volume_name` param.
+#   * `state: view` returns `storage_status` (a dict), not a list of vdisks.
+#   * Drive IDs look like "Disk.Bay.1:Enclosure.Internal.0-1:RAID.Slot.1-1".
+# Because exact disk IDs and PERC support are hardware-specific, storage apply
+# stays disabled until hardware_validated and the lab test in the runbook.
+dell_host_baseline_storage:
+  verify_only: true
+  # Expected layout is read from inventory host_vars (storage.boot/storage.data).
+  # Each must carry: controller_id, volume_type ('RAID 1'), drives (id list),
+  # capacity_gb, and (optional) name.
+  max_drift_virtual_disks: 0
+
+# --- Audit -------------------------------------------------------------------
+dell_host_baseline_audit_event_source: "{{ custos_audit_event_source | default('custos-arcae-control') }}"
+dell_host_baseline_audit_log_path: "{{ custos_audit_log_path | default('/var/log/custos-arcae/audit.jsonl') }}"

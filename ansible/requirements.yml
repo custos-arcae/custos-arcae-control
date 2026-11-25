@@ -1,0 +1,72 @@
+# ansible/requirements.yml
+#
+# Pinned Ansible Galaxy dependencies for custos-arcae-control.
+#
+# Policy
+# ------
+# * Every entry is pinned to an exact version. Floating tags (`>=`, `latest`)
+#   are rejected in review — they break reproducibility, which is a SOC 2
+#   change-management control.
+# * Version bumps require their own PR with the changelog link from the
+#   upstream project in the description.
+# * Collections that pull in transitive dependencies must list them here too,
+#   so `ansible-galaxy install` is deterministic and offline-capable after the
+#   first fetch.
+#
+# Install with:
+#   ansible-galaxy install -r ansible/requirements.yml
+#   ansible-galaxy collection install -r ansible/requirements.yml
+
+---
+collections:
+  # NOTE: ansible.builtin is NOT listed here on purpose. It ships inside
+  # ansible-core (pinned via the ansible==10.5.0 package in
+  # .github/workflows/validate.yml) and is NOT distributable through Galaxy:
+  # `ansible-galaxy collection install ansible.builtin` fails to resolve. Listing
+  # it here breaks the whole `ansible-galaxy install -r requirements.yml` step.
+
+  # POSIX helpers: file ownership, sysctl, authorized_key, log_plays callback.
+  - name: ansible.posix
+    version: 1.6.2
+
+  # General-purpose modules: yaml callback, ini_file, alternatives.
+  - name: community.general
+    version: 9.5.0
+
+  # Crypto helpers for certificate inspection (iDRAC, PBS, Proxmox API).
+  - name: community.crypto
+    version: 2.22.3
+
+  # Network resource modules — used by switch_baseline and management_network
+  # roles when they are implemented. Included now so the pin is reviewed once.
+  - name: ansible.netcommon
+    version: 6.1.3
+
+  # Dell iDRAC / OpenManage integration. Required by dell_host_baseline.
+  # Upstream: https://github.com/dell/dellemc-openmanage-ansible-modules
+  - name: dellemc.openmanage
+    version: 9.7.0
+
+  # Proxmox VE / PBS API helpers. Required by the proxmox_ve and proxmox_backup
+  # roles WHEN they are implemented (out of scope for the Dell commissioning
+  # change). The previously pinned 1.4.1 does not exist on Galaxy, and because
+  # `ansible-galaxy install -r requirements.yml` is all-or-nothing, that single
+  # unsatisfiable pin broke the whole install step and therefore blocked CI for
+  # every workflow, including Dell. It is commented out here so CI is reliable;
+  # the Proxmox change must re-add it pinned to a version that actually resolves
+  # (verify with `ansible-galaxy collection install community.proxmox==<ver>`).
+  # TODO(virtualisation-owners,backup-owners): pin a valid community.proxmox.
+  # - name: community.proxmox
+  #   version: <valid-version>
+
+roles:
+  # No external roles are used in this first change. Every role under
+  # ansible/roles/ is maintained in-tree so that review, attribution and
+  # rollback are all handled by this repository's governance.
+  #
+  # If an external role is ever added, it must be:
+  #   * pinned to an exact version,
+  #   * vendored under ansible/roles/vendor/<name>/ with its licence intact,
+  #   * reviewed by @custos-arcae/security-reviewers,
+  #   * and covered by an ADR explaining why it is not maintained in-tree.
+  []

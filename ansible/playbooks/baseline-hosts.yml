@@ -1,0 +1,205 @@
+# ansible/playbooks/baseline-hosts.yml
+#
+# Operator entry point for the Dell host commissioning workflow.
+#
+# Scope
+# -----
+# Applies the dell_host_baseline role to hosts in the `dell_hosts` group of
+# the selected inventory. This is the FIRST change class implemented in this
+# repository; other playbooks (proxmox-ve, backup, network, switches,
+# monitoring, verify-site) are added only when their workflows land.
+#
+# Runbook
+# -------
+# docs/runbooks/commission-dell-host.md — read it before executing. The
+# runbook names the executor role, the verification evidence, the stop
+# conditions and the recovery path. This playbook is the apply step only.
+#
+# Change plan
+# -----------
+# Required for production. See AGENTS.md §6 and docs/change-plans/template.md.
+# A matching change-plan FILENAME is a necessary check only; it never authorizes
+# an execution on its own. Production is additionally DISABLED in this phase
+# (custos_production_commissioning_enabled=false) and requires an authorized
+# GitHub administrator (branch protection, CODEOWNERS review, required checks)
+# plus an authorized operator in a booked window. See AGENTS.md §5.1.
+#
+# Preflight ordering
+# ------------------
+# gather_facts is false; the play runs controller-side preflight asserts
+# (inventory contract, production gate, change-plan gate, credential presence)
+# BEFORE the explicit `ansible.builtin.setup` fact-gathering task, so an
+# unauthorized or malformed run stops before any SSH, delegated iDRAC call, or
+# remote change is attempted.
+#
+# Usage
+# -----
+#   # Lab, dry run (default — no reboot, no firmware apply):
+#   ansible-playbook -i ../inventories/lab/hosts.yml playbooks/baseline-hosts.yml --check --diff
+#
+#   # Lab, real apply with reboot allowed:
+#   ansible-playbook -i ../inventories/lab/hosts.yml playbooks/baseline-hosts.yml \
+#       -e dell_host_baseline_allow_reboot=true
+#
+#   # Production (DISABLED this phase). Only inside a booked maintenance window,
+#   # only by the executor role named in an approved change plan, and only once
+#   # an administrator has enabled production and GitHub enforcement is in place:
+#   ansible-playbook -i ../inventories/production/lt-vilnius-01/hosts.yml \
+#       playbooks/baseline-hosts.yml --limit <inventory-host> \
+#       -e custos_production_commissioning_enabled=true \
+#       -e custos_change_plan=docs/change-plans/YYYYMMDD-<slug>.md
+
+---
+- name: Commission Dell host baseline
+  hosts: dell_hosts
+  # Fact gathering is DISABLED here on purpose. With gather_facts:true Ansible
+  # opens an SSH connection to every target to run `setup` BEFORE any
+  # pre_task, so the controller-side authorization checks below would run only
+  # after the run had already touched the remote host. Instead we run the
+  # preflight asserts first (all delegate_to: localhost, no facts needed) and
+  # then gather facts explicitly with an `ansible.builtin.setup` task, so the
+  # first remote action happens only after preflight has passed.
+  gather_facts: false
+  # Never run as root by default. The role declares become on the tasks that
+  # need it (package install, systemd unit, local user).
+  become: false
+  strategy: ansible.builtin.linear
+  # Fail the whole play on the first host error. A partial baseline is worse
+  # than no baseline: it produces hosts that look compliant but are not.
+  any_errors_fatal: true
+  serial: 1
+  # Ordered so a single host failure cannot cascade across the rack.
+
+  vars:
+    # Production commissioning is DISABLED during the read-only pilot phase.
+    # This flag is necessary-but-NOT-sufficient: even when set true, a run
+    # still requires (a) an approved change plan, (b) GitHub branch protection
+    # + CODEOWNERS review configured by an administrator, and (c) an
+    # authorized operator inside a booked maintenance window. A matching
+    # change-plan FILENAME alone never authorizes an execution. See AGENTS.md
+    # §5.1 (Authorization enforcement model).
+    custos_production_commissioning_enabled: false
+
+  pre_tasks:
+    - name: Assert inventory contract
+      ansible.builtin.assert:
+        that:
+          - custos_environment is defined
+          - custos_environment in ['lab', 'production']
+          - custos_site is defined
+          - asset_id is defined and asset_id | length > 0
+          - oob_controller is defined
+          - oob_controller.address is defined
+          - oob_controller.username_var is defined
+          - oob_controller.password_var is defined
+        fail_msg: >-
+          Inventory contract violated for {{ inventory_hostname }}. Required
+          variables: custos_environment, custos_site, asset_id, oob_controller
+          (with address, username_var, password_var). See
+          inventories/lab/hosts.yml for the canonical shape.
+        quiet: true
+      delegate_to: localhost
+      run_once: false
+
+    - name: Refuse production commissioning during the read-only pilot phase
+      ansible.builtin.assert:
+        that:
+          - custos_production_commissioning_enabled | bool
+        fail_msg: >-
+          Production commissioning is DISABLED in this phase. This run targets
+          custos_environment=production but
+          custos_production_commissioning_enabled is false. Enabling production
+          requires an authorized GitHub administrator (branch protection,
+          CODEOWNERS review, required checks) AND an authorized operator with
+          an approved change plan AND a booked maintenance window. Setting this
+          flag is necessary but not sufficient; a matching change-plan filename
+          alone does not authorize an execution. See AGENTS.md §5.1.
+        quiet: true
+      when: custos_environment == 'production'
+      delegate_to: localhost
+
+    - name: Refuse to run against production without a change plan
+      ansible.builtin.assert:
+        that:
+          - custos_change_plan is defined
+          - custos_change_plan | length > 0
+          - custos_change_plan is match('^docs/change-plans/\d{8}-.+\.md$')
+        fail_msg: >-
+          Production execution requires -e custos_change_plan=docs/change-plans/YYYYMMDD-<slug>.md
+          pointing at a filed and approved change plan. The filename pattern is
+          a necessary check only; approval is enforced by CODEOWNERS review and
+          the approver role named in the plan, not by this assert. See AGENTS.md §6.
+        quiet: true
+      when: custos_environment == 'production'
+      delegate_to: localhost
+
+    - name: Verify out-of-band credentials are present in the environment
+      ansible.builtin.assert:
+        that:
+          - lookup('ansible.builtin.env', oob_controller.username_var) | length > 0
+          - lookup('ansible.builtin.env', oob_controller.password_var) | length > 0
+        fail_msg: >-
+          Out-of-band credentials for {{ inventory_hostname }} are not set.
+          Export {{ oob_controller.username_var }} and {{ oob_controller.password_var }}
+          in your shell before running. Values are never read from inventory
+          or from this playbook.
+        quiet: true
+      # Offline CI fixtures make no iDRAC calls, so credentials are not needed;
+      # the role asserts offline mode is never combined with an apply gate.
+      when: not (dell_host_baseline_offline | default(false) | bool)
+      delegate_to: localhost
+      no_log: true
+
+    - name: Gather facts from the target (first remote action, after preflight)
+      ansible.builtin.setup:
+      # Explicit fact gathering. Runs only after every controller-side preflight
+      # assert above has passed, so an unauthorized or malformed run never opens
+      # an SSH connection, a delegated iDRAC call, or a remote change.
+
+    - name: Record run start in the audit log
+      ansible.builtin.lineinfile:
+        path: "{{ custos_audit_log_path | default('/var/log/custos-arcae/audit.jsonl') }}"
+        # to_json of a dict guarantees a valid JSON line; a folded JSON-literal
+        # string is coerced to a Python dict and written as invalid JSONL.
+        line: >-
+          {{ {
+            'ts': ansible_date_time.iso8601,
+            'event': 'baseline-hosts.start',
+            'source': custos_audit_event_source | default('custos-arcae-control'),
+            'environment': custos_environment,
+            'site': custos_site,
+            'asset_id': asset_id,
+            'host': inventory_hostname,
+            'change_plan': custos_change_plan | default('none')
+          } | to_json }}
+        create: true
+        mode: "0640"
+      # Offline (CI fixture) runs write to a caller-owned path with no privilege
+      # escalation; real runs escalate to write under /var/log.
+      become: "{{ not (dell_host_baseline_offline | default(false) | bool) }}"
+      delegate_to: localhost
+      changed_when: true
+
+  roles:
+    - role: dell_host_baseline
+
+  post_tasks:
+    - name: Record run end in the audit log
+      ansible.builtin.lineinfile:
+        path: "{{ custos_audit_log_path | default('/var/log/custos-arcae/audit.jsonl') }}"
+        line: >-
+          {{ {
+            'ts': ansible_date_time.iso8601,
+            'event': 'baseline-hosts.end',
+            'source': custos_audit_event_source | default('custos-arcae-control'),
+            'environment': custos_environment,
+            'site': custos_site,
+            'asset_id': asset_id,
+            'host': inventory_hostname,
+            'change_plan': custos_change_plan | default('none')
+          } | to_json }}
+        create: true
+        mode: "0640"
+      become: "{{ not (dell_host_baseline_offline | default(false) | bool) }}"
+      delegate_to: localhost
+      changed_when: true

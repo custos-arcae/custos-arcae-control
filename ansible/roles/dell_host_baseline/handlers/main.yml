@@ -1,0 +1,63 @@
+# ansible/roles/dell_host_baseline/handlers/main.yml
+#
+# Handlers are the only place this role is allowed to reboot a host or
+# restart a service. Every handler is gated by a variable that defaults to
+# false, so a forgotten notify cannot silently reboot production.
+
+---
+- name: Restart iDRAC services
+  ansible.builtin.debug:
+    msg: >-
+      iDRAC settings change requested for {{ inventory_hostname }}
+      (asset {{ asset_id }}). Attribute changes applied via
+      dellemc.openmanage.idrac_attributes / idrac_timezone_ntp / idrac_syslog
+      take effect without a host reboot; some attributes require an iDRAC
+      reset (racadm racreset) which is a separate, change-planned action and
+      is NOT performed by this marker.
+  changed_when: true
+  # This handler is an intent marker only. It never contacts the device, so
+  # --check and offline runs still report the intent safely. An actual iDRAC
+  # reset is an operator action named in the change plan, not an implicit step.
+  listen: restart idrac
+
+- name: Reboot host for firmware activation
+  ansible.builtin.reboot:
+    msg: "Reboot initiated by dell_host_baseline (change plan: {{ custos_change_plan | default('none') }})"
+    reboot_timeout: 1800
+    post_reboot_delay: 60
+    connect_timeout: 30
+    test_command: uptime
+  when:
+    - dell_host_baseline_allow_reboot | bool
+    - custos_environment != 'production' or custos_change_plan is defined
+  listen: reboot host
+
+- name: Refuse reboot when not allowed
+  ansible.builtin.fail:
+    msg: >-
+      A reboot was requested for {{ inventory_hostname }} but
+      dell_host_baseline_allow_reboot is false. Re-run the playbook with
+      -e dell_host_baseline_allow_reboot=true ONLY inside a booked
+      maintenance window and with a filed change plan.
+  when: not (dell_host_baseline_allow_reboot | bool)
+  listen: reboot host
+
+- name: Reload systemd units
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+  listen: reload systemd
+
+- name: Restart time synchronisation service
+  ansible.builtin.service:
+    name: "{{ dell_host_baseline_time_service | default('ntpsec') }}"
+    state: restarted
+  become: true
+  listen: restart time service
+
+- name: Apply sysctl baseline
+  ansible.builtin.command:
+    cmd: sysctl --system
+  become: true
+  changed_when: true
+  listen: apply sysctl

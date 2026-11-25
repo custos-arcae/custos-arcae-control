@@ -1,0 +1,195 @@
+# ansible/roles/dell_host_baseline/tasks/firmware.yml
+#
+# Firmware apply path. Included from tasks/main.yml ONLY when:
+#   * dell_host_baseline_apply              == true
+#   * dell_host_baseline_apply_firmware     == true
+#   * dell_host_baseline_hardware_validated == true
+#   * at least one component has drifted from the pinned baseline
+#   * reboot authorization was already asserted in tasks/main.yml BEFORE this
+#     file is reached (a submitted update that needs activation is a committed
+#     reboot, so the check must precede the submit).
+#
+# API CONTRACT (audited against dellemc.openmanage==9.7.0 idrac_firmware):
+#   valid params  : share_name(REQUIRED), share_user, share_password, share_mnt,
+#                   job_wait, catalog_file_name, ignore_cert_warning,
+#                   apply_update, reboot, proxy_support, proxy_server,
+#                   proxy_port, proxy_type, proxy_uname, proxy_passwd
+#   INVALID params: `proxy`, `job_wait_timeout` (do not exist on this module —
+#                   passing them makes the module reject the call)
+#   return        : update_status = {InstanceID, JobState, Message, MessageId,
+#                   Name, JobStartTime, Status}. There is NO `JobStatus` key;
+#                   success is Status=='Success' and JobState=='Completed'.
+#   share_name    : MUST be a network share reachable BY THE iDRAC
+#                   (CIFS/NFS/HTTP/HTTPS/FTP per the module short_description).
+#                   A control-node-local path such as /tmp/... is INVALID — the
+#                   iDRAC pulls the catalogue and packages itself.
+#
+# Recovery: each firmware target carries a `recovery` string naming the vendor
+# procedure. The operator must have that procedure open before running this
+# file. See docs/runbooks/commission-dell-host.md §Recovery.
+
+---
+- name: Assert the firmware share is iDRAC-reachable (not control-node-local)
+  ansible.builtin.assert:
+    that:
+      - dell_host_baseline_firmware_share.name is match('^(https?://|//|[^/]+:/)')
+    fail_msg: >-
+      dell_host_baseline_firmware_share.name must be a network share the iDRAC
+      can reach: http(s)://host/path, //host/share (CIFS) or host:/export
+      (NFS). Got '{{ dell_host_baseline_firmware_share.name }}'. A control-node
+      local path is rejected because idrac_firmware makes the iDRAC pull the
+      repository itself (audited: idrac_firmware 9.7.0 short_description).
+    quiet: true
+
+- name: Reject cleartext or unreachable firmware share transports (FTP/TFTP/local)
+  ansible.builtin.assert:
+    that:
+      - dell_host_baseline_firmware_share.name is not match('^(ftp|tftp)://')
+    fail_msg: >-
+      dell_host_baseline_firmware_share.name must not be an FTP or TFTP share.
+      Got '{{ dell_host_baseline_firmware_share.name }}'. FTP is cleartext and
+      TFTP is mis-routed by idrac_firmware 9.7.0, so neither can be shown to
+      deliver verified bytes to the iDRAC. Use an HTTPS share (fully verifiable)
+      or an attested HTTP/NFS/CIFS share. This mirrors
+      verify_firmware_catalogue.py, which also rejects these transports as
+      NEVER_PERMITTED.
+    quiet: true
+
+- name: Resolve firmware share credentials from the environment (CIFS/NFS)
+  ansible.builtin.set_fact:
+    dell_host_baseline_fw_share_user: >-
+      {{ lookup('ansible.builtin.env', dell_host_baseline_firmware_share.user_var)
+         if dell_host_baseline_firmware_share.user_var | length > 0 else '' }}
+    dell_host_baseline_fw_share_password: >-
+      {{ lookup('ansible.builtin.env', dell_host_baseline_firmware_share.password_var)
+         if dell_host_baseline_firmware_share.password_var | length > 0 else '' }}
+  no_log: true
+
+- name: Resolve the control-node path of the catalogue that will be verified
+  ansible.builtin.set_fact:
+    dell_host_baseline_firmware_catalogue_local_path: >-
+      {{ ('/tmp/custos-firmware-verify/' ~ dell_host_baseline_firmware_catalogue.file_name)
+         if dell_host_baseline_firmware_share.name is match('^https?://')
+         else ((dell_host_baseline_firmware_share.mnt
+                | default(dell_host_baseline_firmware_share.name, true)
+                | regex_replace('/+$', ''))
+               ~ '/' ~ dell_host_baseline_firmware_catalogue.file_name) }}
+
+- name: Fetch the catalogue to the control node for content verification (HTTP/HTTPS shares)
+  ansible.builtin.get_url:
+    url: "{{ dell_host_baseline_firmware_share.name }}/{{ dell_host_baseline_firmware_catalogue.file_name }}"
+    dest: "{{ dell_host_baseline_firmware_catalogue_local_path }}"
+    checksum: "sha256:{{ dell_host_baseline_firmware_catalogue.sha256 }}"
+    mode: "0640"
+    force: true
+  delegate_to: localhost
+  register: dell_host_baseline_catalogue_fetch
+  when: dell_host_baseline_firmware_share.name is match('^https?://')
+
+- name: Verify the pinned catalogue checksum on a mounted share (NFS/CIFS)
+  ansible.builtin.stat:
+    path: "{{ dell_host_baseline_firmware_catalogue_local_path }}"
+    checksum_algorithm: sha256
+    get_checksum: true
+  delegate_to: localhost
+  register: dell_host_baseline_catalogue_stat
+  when: dell_host_baseline_firmware_share.name is not match('^https?://')
+
+- name: Fail when the mounted-share catalogue checksum does not match the pin
+  ansible.builtin.assert:
+    that:
+      - dell_host_baseline_catalogue_stat.stat.exists
+      - dell_host_baseline_catalogue_stat.stat.checksum == dell_host_baseline_firmware_catalogue.sha256
+    fail_msg: >-
+      The catalogue on the firmware share does not match the pinned SHA-256,
+      or is not present at the expected mount. Refusing to let the iDRAC pull
+      an unapproved repository. Expected
+      {{ dell_host_baseline_firmware_catalogue.sha256 }}.
+    quiet: true
+  when: dell_host_baseline_firmware_share.name is not match('^https?://')
+
+# SINGLE SOURCE OF TRUTH for "is this catalogue safe to hand to the iDRAC".
+# verify_firmware_catalogue.py classifies the share exactly the way
+# idrac_firmware routes it and rejects: empty, malformed or ambiguous
+# catalogues; components that are not approved targets; versions that do not
+# match the approved baseline; entries with no package identity (so the
+# artifact the iDRAC would consume cannot be pinned); and any non-HTTPS share
+# without the source-verified attestation. It prints a verdict JSON and exits
+# non-zero unless the catalogue is fully approved. failed_when:false so the
+# assert below can surface the machine-readable reasons to the operator.
+- name: Verify the fetched catalogue against the approved firmware baseline
+  ansible.builtin.command:
+    argv: >-
+      {{ [ansible_playbook_python,
+          (role_path ~ '/files/verify_firmware_catalogue.py'),
+          '--catalogue', dell_host_baseline_firmware_catalogue_local_path,
+          '--share-name', dell_host_baseline_firmware_share.name,
+          '--targets', (dell_host_baseline_firmware_targets | to_json)]
+         + (['--source-verified']
+            if (dell_host_baseline_firmware_source_verified | bool) else []) }}
+  delegate_to: localhost
+  register: dell_host_baseline_catalogue_verdict
+  changed_when: false
+  failed_when: false
+
+- name: Assert the catalogue verdict is approved BEFORE any firmware is submitted
+  ansible.builtin.assert:
+    that:
+      - dell_host_baseline_catalogue_verdict.rc == 0
+      - (dell_host_baseline_catalogue_verdict.stdout | from_json).ok | bool
+    fail_msg: >-
+      Catalogue verification failed for {{ inventory_hostname }} ({{ asset_id }}).
+      The iDRAC pulls <share>/{{ dell_host_baseline_firmware_catalogue.file_name }}
+      and every package it references on its own, so an unapproved, empty,
+      ambiguous or unverifiable catalogue would be flashed verbatim.
+      rc={{ dell_host_baseline_catalogue_verdict.rc }}
+      verdict={{ dell_host_baseline_catalogue_verdict.stdout }}.
+      NO firmware update was submitted. Fix the catalogue/share, or supply the
+      documented source attestation (dell_host_baseline_firmware_source_verified)
+      for a non-HTTPS share, then re-run.
+    quiet: true
+
+- name: Submit the firmware update (reboot handled by the handler, never implicitly)
+  dellemc.openmanage.idrac_firmware:
+    idrac_ip: "{{ oob_controller.address }}"
+    idrac_user: "{{ dell_host_baseline_oob_username }}"
+    idrac_password: "{{ dell_host_baseline_oob_password }}"
+    validate_certs: true
+    ca_path: "{{ dell_host_baseline_idrac_ca_path }}"
+    timeout: "{{ dell_host_baseline_idrac_timeout }}"
+    share_name: "{{ dell_host_baseline_firmware_share.name }}"
+    share_user: "{{ dell_host_baseline_fw_share_user | default(omit, true) }}"
+    share_password: "{{ dell_host_baseline_fw_share_password | default(omit, true) }}"
+    share_mnt: "{{ dell_host_baseline_firmware_share.mnt | default(omit, true) }}"
+    catalog_file_name: "{{ dell_host_baseline_firmware_catalogue.file_name }}"
+    apply_update: true
+    reboot: false
+    job_wait: true
+    ignore_cert_warning: false
+  delegate_to: localhost
+  register: dell_host_baseline_firmware_apply
+  no_log: true
+
+- name: Fail if the firmware update job did not succeed
+  ansible.builtin.assert:
+    that:
+      - dell_host_baseline_firmware_apply.update_status is defined
+      - (dell_host_baseline_firmware_apply.update_status.Status | default('')) == 'Success'
+      - (dell_host_baseline_firmware_apply.update_status.JobState | default('')) == 'Completed'
+    fail_msg: >-
+      Firmware update did not succeed on {{ inventory_hostname }} ({{ asset_id }}).
+      update_status={{ dell_host_baseline_firmware_apply.update_status | default('undefined') }}.
+      Stop. Do not retry. Open the console, capture the LifecycleController log
+      (idrac_lifecycle_controller_logs), and follow the recovery procedure named
+      in dell_host_baseline_firmware_targets for the failing component.
+    quiet: true
+
+- name: Request a reboot to activate firmware (gated by the reboot handler)
+  ansible.builtin.debug:
+    msg: >-
+      Firmware submitted on {{ inventory_hostname }}. Activation requires a
+      reboot. The reboot handler fires only when
+      dell_host_baseline_allow_reboot=true (asserted before submit).
+      Post-activation version verification runs in tasks/main.yml §8.
+  changed_when: true
+  notify: reboot host

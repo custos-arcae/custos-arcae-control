@@ -1,0 +1,73 @@
+# CODEOWNERS
+#
+# Required reviewers per path. Order matters: later rules override earlier ones.
+# Team handles (not individuals) are used to keep ownership durable across
+# personnel changes and to comply with GDPR data-minimisation.
+#
+# TODO(platform-leads): replace the placeholder teams below with the real
+# GitHub team slugs before enabling branch protection. Until then, this file
+# documents intent and is enforced only where the teams exist.
+#
+# Reference: https://docs.github.com/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# --- Default owners for everything in the repo -------------------------------
+*                                       @custos-arcae/platform-leads
+
+# --- Governance documents ----------------------------------------------------
+/README.md                              @custos-arcae/platform-leads @custos-arcae/security-reviewers
+/SCOPE.md                               @custos-arcae/platform-leads @custos-arcae/security-reviewers
+/AGENTS.md                              @custos-arcae/platform-leads @custos-arcae/security-reviewers
+/CHANGELOG.md                           @custos-arcae/platform-leads
+
+# --- GitHub configuration (branch protection, CI) ---------------------------
+/.github/                               @custos-arcae/security-reviewers @custos-arcae/platform-leads
+/.github/CODEOWNERS                     @custos-arcae/security-reviewers
+/.github/workflows/                     @custos-arcae/security-reviewers
+
+# --- Ansible: shared configuration -------------------------------------------
+/ansible/ansible.cfg                    @custos-arcae/platform-leads
+/ansible/requirements.yml               @custos-arcae/platform-leads
+
+# --- Ansible: playbooks (operator entry points) ------------------------------
+/ansible/playbooks/                     @custos-arcae/platform-leads
+/ansible/playbooks/verify-site.yml      @custos-arcae/platform-leads @custos-arcae/security-reviewers
+
+# --- Ansible: roles ----------------------------------------------------------
+/ansible/roles/dell_host_baseline/      @custos-arcae/hardware-owners
+/ansible/roles/proxmox_ve/              @custos-arcae/virtualisation-owners
+/ansible/roles/proxmox_backup/          @custos-arcae/backup-owners @custos-arcae/security-reviewers
+/ansible/roles/management_network/      @custos-arcae/network-owners
+/ansible/roles/switch_baseline/         @custos-arcae/network-owners
+/ansible/roles/monitoring/              @custos-arcae/observability-owners
+
+# --- Provisioning ------------------------------------------------------------
+/provisioning/dell/                     @custos-arcae/hardware-owners
+/provisioning/proxmox-ve/               @custos-arcae/virtualisation-owners
+
+# --- Inventories -------------------------------------------------------------
+# Lab is safe: platform leads review.
+/inventories/lab/                       @custos-arcae/platform-leads
+
+# Production lists THREE teams. GitHub CODEOWNERS semantics: a single
+# matching line is satisfied when ANY ONE listed owner approves (any owner can
+# also block by requesting changes) — it does NOT require all three to approve.
+# If policy requires sign-off from platform-leads AND security-reviewers AND
+# the site team, that must be enforced with branch-protection required-review
+# settings, not by this line alone. See AGENTS.md §5.1. An administrator must
+# confirm these team slugs exist and have write access before enabling
+# protection; until then production stays disabled.
+/inventories/production/                @custos-arcae/platform-leads @custos-arcae/security-reviewers @custos-arcae/site-lt-vilnius
+/inventories/production/lt-vilnius-01/  @custos-arcae/platform-leads @custos-arcae/security-reviewers @custos-arcae/site-lt-vilnius
+
+# --- Docs --------------------------------------------------------------------
+/docs/adr/                              @custos-arcae/platform-leads @custos-arcae/security-reviewers
+/docs/change-plans/                     @custos-arcae/platform-leads
+/docs/runbooks/                         @custos-arcae/platform-leads
+
+# Runbooks that can reboot hosts, wipe switches or prune backups additionally
+# require security sign-off.
+/docs/runbooks/commission-dell-host.md          @custos-arcae/hardware-owners @custos-arcae/security-reviewers
+/docs/runbooks/change-management-network.md     @custos-arcae/network-owners @custos-arcae/security-reviewers
+/docs/runbooks/reload-switch-configuration.md   @custos-arcae/network-owners @custos-arcae/security-reviewers
+/docs/runbooks/recover-proxmox-node.md          @custos-arcae/virtualisation-owners @custos-arcae/security-reviewers
+/docs/runbooks/restore-from-pbs.md              @custos-arcae/backup-owners @custos-arcae/security-reviewers

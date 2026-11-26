@@ -17,7 +17,7 @@ description of how a Custos ARCAE site is built and operated:
 
 2. **Inventory of managed entities**
    - Hosts, switches, and out-of-band controllers per environment (`lab`,
-     `production/lt-vilnius-01`).
+     `production/lt/lt-vilnius-01`; country-first layout per ADR-0003).
    - Stable asset IDs and site/device-specific approved settings.
    - **Secret references** (never plaintext credentials).
 
@@ -69,11 +69,12 @@ redirected to the owning system.
 | Environment | Purpose | CI may touch? | Change plan required? |
 | --- | --- | --- | --- |
 | `lab` | Disposable validation of roles, playbooks, and answer-file formats. | Yes (safe, read-mostly checks). | No, but PR description must state lab evidence. |
-| `production/lt-vilnius-01` | The live Vilnius site. | **No.** Production credentials are never available to PR CI. | **Yes**, filed under `docs/change-plans/`. |
+| `production/lt/lt-vilnius-01` | The live Vilnius site (country-first path, ADR-0003). | **No.** Production credentials are never available to PR CI. | **Yes**, filed under `docs/change-plans/`. |
 
 Adding a new production site requires an ADR under `docs/adr/` describing:
 network reachability, secret-store binding, escalation path, and the delta
-from `lt-vilnius-01`.
+from the reference site `lt-vilnius-01` (inventory path
+`production/lt/lt-vilnius-01`).
 
 ## Acceptance criteria for scope disputes
 

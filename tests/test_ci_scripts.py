@@ -101,7 +101,7 @@ def test_detect_secrets_main_clean(monkeypatch) -> None:  # type: ignore[no-unty
 
 # --- change-plan fixtures ----------------------------------------------------
 
-PROD_HOST = "inventories/production/lt-vilnius-01/host_vars/LT-VIL-0001.yml"
+PROD_HOST = "inventories/production/lt/lt-vilnius-01/host_vars/LT-VIL-0001.yml"
 DELL_ROLE = "ansible/roles/dell_host_baseline/defaults/main.yml"
 
 
@@ -112,7 +112,7 @@ def _plan(change_class: str, status: str, assets: str = "LT-VIL-0001") -> str:
         "| Field | Value |\n"
         "| --- | --- |\n"
         f"| Change class | {change_class} |\n"
-        "| Environment | production/lt-vilnius-01 |\n"
+        "| Environment | production/lt/lt-vilnius-01 |\n"
         f"| Status | {status} |\n\n"
         "## 3.1 Target devices\n\n"
         "| Asset ID | Hostname |\n"

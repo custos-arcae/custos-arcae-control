@@ -13,7 +13,7 @@
 | Change plan ID | `YYYYMMDD-<slug>` |
 | Title | |
 | Change class | host-baseline / proxmox-ve / proxmox-backup / management-network / switch / monitoring / verify / docs / ci |
-| Environment | lab / production/lt-vilnius-01 |
+| Environment | lab / production/lt/lt-vilnius-01 |
 | Runbook | path under `docs/runbooks/`, or "none" with justification |
 | ADR (if required) | path under `docs/adr/`, or "not required" |
 | PR | link |

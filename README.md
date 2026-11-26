@@ -30,7 +30,8 @@ custos-arcae-control/
 ├── inventories/
 │   ├── lab/                ← disposable, safe to run from CI
 │   └── production/
-│       └── lt-vilnius-01/  ← restricted; secret refs only, no plaintext creds
+│       └── lt/             ← country-first: one directory per country (ADR-0003)
+│           └── lt-vilnius-01/  ← restricted; secret refs only, no plaintext creds
 ├── provisioning/
 │   ├── dell/               ← iDRAC / firmware / disk / OS-install inputs
 │   └── proxmox-ve/         ← installer answer file + notes

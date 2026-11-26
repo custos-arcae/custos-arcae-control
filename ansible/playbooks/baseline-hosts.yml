@@ -44,7 +44,7 @@
 #   # Production (DISABLED this phase). Only inside a booked maintenance window,
 #   # only by the executor role named in an approved change plan, and only once
 #   # an administrator has enabled production and GitHub enforcement is in place:
-#   ansible-playbook -i ../inventories/production/lt-vilnius-01/hosts.yml \
+#   ansible-playbook -i ../inventories/production/lt/lt-vilnius-01/hosts.yml \
 #       playbooks/baseline-hosts.yml --limit <inventory-host> \
 #       -e custos_production_commissioning_enabled=true \
 #       -e custos_change_plan=docs/change-plans/YYYYMMDD-<slug>.md

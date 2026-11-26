@@ -53,8 +53,10 @@ The executor must have:
 Each item is a stop condition. If any is false, do not start.
 
 - [ ] Asset registered with a stable `asset_id` in the asset system of record.
-- [ ] Host present in inventory (`inventories/<env>/hosts.yml` and
-      `host_vars/<asset-id>.yml`) with `oob_controller`, `storage`, and
+- [ ] Host present in inventory (`inventories/<env>/hosts.yml` — for
+      production, `inventories/production/<country>/<site-id>/hosts.yml` per
+      ADR-0003 — and `host_vars/<inventory-hostname>.yml`) with
+      `oob_controller`, `storage`, and
       `network` blocks complete.
 - [ ] Firmware baseline pinned in `group_vars/dell_hosts.yml`:
       `dell_host_baseline_firmware_catalogue.sha256` and a non-empty

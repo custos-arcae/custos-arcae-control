@@ -1,8 +1,9 @@
 # Lab-wide variables for custos-arcae-control.
 #
 # Applies to every host in inventories/lab/hosts.yml. Site-specific values for
-# production live in inventories/production/<site>/group_vars/all.yml and are
-# reviewed under a stricter CODEOWNERS rule.
+# production live in inventories/production/<country>/<site-id>/group_vars/all.yml
+# (country-first layout, ADR-0003) and are reviewed under a stricter CODEOWNERS
+# rule.
 #
 # Compliance notes
 # ----------------

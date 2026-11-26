@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SYNTHETIC fixture: MALFORMED XML (the SoftwareComponent element is never
+     closed and a tag is truncated). The parser must fail closed rather than
+     silently treat a truncated catalogue as empty or valid. -->
+<Manifest>
+  <SoftwareComponent componentID="1001" componentType="BIOS" path="FOLDER0001/BIOS-2.11.2.exe">
+    <Name><Display lang="en">BIOS</Display></Name>
+    <Version><Display>2.11.2</Display>
+  <SoftwareComponent componentID="1002" componentType="FRMW" path="FOLDER0002/iDRAC-6.00.02.00.exe">
+    <Name><Display lang="en">iDRAC9 Firmware</Name>
+</Manifest

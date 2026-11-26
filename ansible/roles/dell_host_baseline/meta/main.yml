@@ -1,0 +1,114 @@
+# ansible/roles/dell_host_baseline/meta/main.yml
+#
+# Role metadata. Declares the minimum Ansible version, supported platforms and
+# role dependencies. Dependencies are intentionally empty: this role is the
+# foundation of the commissioning workflow and must not pull in other roles
+# that could mutate the host before the baseline is verified.
+
+---
+galaxy_info:
+  role_name: dell_host_baseline
+  namespace: custos_arcae
+  author: Custos ARCAE platform-leads (team, not individual — GDPR)
+  description: >-
+    Baseline a Dell PowerEdge host for Custos ARCAE: firmware, iDRAC
+    settings, host OS packages, kernel hardening, and storage layout
+    verification. Destructive steps are gated and off by default.
+  company: Custos ARCAE
+  license: Proprietary
+  min_ansible_version: "2.17"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm
+        - trixie
+    - name: Ubuntu
+      versions:
+        - noble
+  galaxy_tags:
+    - dell
+    - idrac
+    - firmware
+    - baseline
+    - hardware
+    - proxmox
+
+dependencies: []
+# Explicitly no dependencies. The proxmox_ve role (when implemented) will
+# declare a dependency on this role, not the other way around.
+
+argument_specs:
+  main:
+    short_description: Baseline a Dell PowerEdge host.
+    description:
+      - Verifies firmware, iDRAC, host OS and storage layout against the
+        inventory contract.
+      - Mutates state only when the corresponding gate variable is true.
+    author: Custos ARCAE platform-leads
+    options:
+      dell_host_baseline_apply:
+        type: bool
+        default: false
+        description: Master switch for any mutation.
+      dell_host_baseline_hardware_validated:
+        type: bool
+        default: false
+        description: >-
+          Lab hardware-validation gate. Firmware and storage (RAID) apply are
+          refused unless this is true for the exact PowerEdge model and PERC.
+      dell_host_baseline_apply_firmware:
+        type: bool
+        default: false
+        description: >-
+          Allow firmware updates. Requires apply, hardware_validated, a pinned
+          catalogue SHA-256, non-empty target versions and an iDRAC-reachable
+          share. Requires a change plan.
+      dell_host_baseline_firmware_source_verified:
+        type: bool
+        default: false
+        description: >-
+          Operator attestation for a non-HTTPS firmware share (HTTP/NFS/CIFS).
+          The iDRAC pulls the catalogue and packages itself, so the control
+          node cannot prove byte identity over those transports; the catalogue
+          verifier rejects them unless this is true. HTTPS needs no attestation;
+          FTP/TFTP/local are never permitted. Does not by itself enable apply.
+      dell_host_baseline_allow_reboot:
+        type: bool
+        default: false
+        description: >-
+          Allow the host to reboot. Asserted BEFORE a firmware update that
+          needs activation is submitted. Requires a change plan.
+      dell_host_baseline_apply_idrac:
+        type: bool
+        default: false
+        description: Allow the iDRAC settings baseline (attributes, NTP, syslog).
+      dell_host_baseline_apply_storage:
+        type: bool
+        default: false
+        description: >-
+          Allow RAID reconfiguration. Requires hardware_validated and disks
+          confirmed empty.
+      dell_host_baseline_storage_disks_confirmed_empty:
+        type: bool
+        default: false
+        description: Operator attestation that target disks hold no data.
+      dell_host_baseline_idrac_ca_path:
+        type: str
+        default: ""
+        description: >-
+          Path to the site CA / pinned iDRAC certificate. Must be non-empty;
+          the role always calls iDRAC with validate_certs=true.
+      dell_host_baseline_offline:
+        type: bool
+        default: false
+        description: >-
+          CI/test affordance that suppresses all remote iDRAC calls and uses
+          the fixture variables. Mutually exclusive with every apply gate.
+      dell_host_baseline_fixture_firmware:
+        type: dict
+        default: {}
+        description: Offline firmware version map (ElementName -> Version).
+      dell_host_baseline_fixture_storage:
+        type: dict
+        default: {}
+        description: Offline storage layout fixture keyed by role (boot/data).

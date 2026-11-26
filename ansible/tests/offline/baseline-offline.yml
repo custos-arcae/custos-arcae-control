@@ -1,0 +1,34 @@
+# ansible/tests/offline/baseline-offline.yml
+#
+# CI-safe playbook that runs the dell_host_baseline role end to end WITHOUT
+# contacting a device. It replaces the old hosted-runner "dry-run against lab"
+# step, which reached out to unreachable iDRAC addresses (198.51.100.x) because
+# the role's read-only info tasks set check_mode:false.
+#
+# How it stays offline:
+#   * The fixture inventory sets dell_host_baseline_offline=true and
+#     ansible_connection=local for every host.
+#   * In offline mode the role makes no idrac_* calls (tasks/main.yml,
+#     tasks/storage.yml guard every remote task on `not offline`).
+#   * No apply gate is set, so firmware/idrac/storage mutation is unreachable.
+#   * The audit event is written without privilege escalation (become is
+#     derived from `not offline`).
+#
+# This validates: role argument_specs, the local authorization asserts, the
+# firmware drift computation, the storage-layout contract assertions, and the
+# audit-event rendering — i.e. everything that does not require hardware.
+#
+# Run from the ansible/ directory:
+#   ansible-playbook -i tests/offline/inventory.yml tests/offline/baseline-offline.yml
+
+---
+- name: Offline fixture run of the Dell host baseline role
+  hosts: dell_hosts
+  gather_facts: true
+  become: false
+  strategy: ansible.builtin.linear
+  any_errors_fatal: true
+  serial: 1
+
+  roles:
+    - role: dell_host_baseline

@@ -1,0 +1,377 @@
+# ansible/roles/dell_host_baseline/tasks/main.yml
+#
+# Orchestrator for the Dell host baseline role. Sections run in this order:
+#
+#   1. LOCAL authorization & input checks (no device touched, no network).
+#   2. Gather facts from iDRAC (read-only, TLS-verified).
+#   3. Verify firmware against the pinned baseline (read-only drift report).
+#   4. Apply firmware if gated (tasks/firmware.yml) — requires hardware
+#      validation, an iDRAC-reachable share, and reboot authorization checked
+#      BEFORE submit.
+#   5. Apply iDRAC settings if gated (tasks/idrac.yml) — idrac_attributes /
+#      idrac_timezone_ntp / idrac_syslog, NOT idrac_server_config_profile.
+#   6. Apply host OS baseline (packages, sysctl, services).
+#   7. Verify storage layout (read-only); apply only if quadruple-gated
+#      (tasks/storage.yml).
+#   8. Post-activation verification, then audit.
+#
+# API CONTRACT: every dellemc.openmanage call below uses only parameters that
+# exist in dellemc.openmanage==9.7.0. Auth params (idrac_ip, idrac_user,
+# idrac_password, validate_certs, ca_path, timeout) come from the shared
+# argspec in plugins/module_utils/{idrac_redfish,dellemc_idrac}.py.
+#
+# TLS: validate_certs is TRUE and ca_path is REQUIRED. There is no code path
+# that disables certificate verification.
+
+---
+# ---------------------------------------------------------------------------
+# 1. LOCAL authorization & input checks (run before any remote fact gathering)
+# ---------------------------------------------------------------------------
+- name: Assert role contract
+  ansible.builtin.assert:
+    that:
+      - asset_id is defined and asset_id | length > 0
+      - oob_controller is defined
+      - oob_controller.address is defined
+      - oob_controller.username_var is defined
+      - oob_controller.password_var is defined
+      - dell_host_baseline_firmware_targets is iterable
+      - not (dell_host_baseline_apply_storage | bool) or
+        (dell_host_baseline_storage_disks_confirmed_empty | bool)
+    fail_msg: >-
+      dell_host_baseline contract violated on {{ inventory_hostname }}.
+      Required: asset_id, oob_controller{address,username_var,password_var},
+      dell_host_baseline_firmware_targets. Storage apply requires the
+      disks-confirmed-empty attestation.
+    quiet: true
+
+- name: Assert trusted iDRAC TLS verification is configured
+  ansible.builtin.assert:
+    that:
+      - dell_host_baseline_idrac_ca_path | length > 0
+    fail_msg: >-
+      dell_host_baseline_idrac_ca_path is empty. The role requires trusted
+      TLS verification of the iDRAC (validate_certs=true). Provide the site CA
+      or the pinned iDRAC certificate path in inventory. Refusing to fall back
+      to validate_certs=false — see ansible.cfg threat model and
+      docs/runbooks/commission-dell-host.md.
+    quiet: true
+
+- name: Assert firmware apply is authorized and pinned
+  ansible.builtin.assert:
+    that:
+      - dell_host_baseline_hardware_validated | bool
+      - dell_host_baseline_firmware_share.name | length > 0
+      - dell_host_baseline_firmware_catalogue.sha256 | length == 64
+      - dell_host_baseline_firmware_catalogue.sha256 is match('^[0-9a-f]{64}$')
+      - dell_host_baseline_firmware_targets | selectattr('target_version', 'equalto', '') | list | length == 0
+    fail_msg: >-
+      Firmware apply requires ALL of: dell_host_baseline_hardware_validated=true
+      (lab evidence on the exact model/PERC), a non-empty iDRAC-reachable
+      firmware share name, a 64-char lowercase catalogue SHA-256, and a
+      non-empty target_version for every component. See
+      docs/runbooks/commission-dell-host.md §"Hardware validation required".
+    quiet: true
+  when: dell_host_baseline_apply_firmware | bool
+
+- name: Assert storage apply is authorized
+  ansible.builtin.assert:
+    that:
+      - dell_host_baseline_hardware_validated | bool
+      - dell_host_baseline_storage_disks_confirmed_empty | bool
+    fail_msg: >-
+      Storage (RAID) apply requires dell_host_baseline_hardware_validated=true
+      AND dell_host_baseline_storage_disks_confirmed_empty=true. RAID mutation
+      is destructive and hardware-specific; it stays disabled until the PERC
+      model, exact disk IDs and recovery procedure are validated in lab.
+    quiet: true
+  when: dell_host_baseline_apply_storage | bool
+
+- name: Assert reboot authorization before any firmware submit
+  ansible.builtin.assert:
+    that:
+      - dell_host_baseline_allow_reboot | bool
+    fail_msg: >-
+      A firmware update is requested and at least one target component
+      requires reboot for activation. Reboot authorization
+      (dell_host_baseline_allow_reboot=true) must be granted BEFORE the update
+      is submitted — a submitted update that needs activation is already a
+      committed reboot. Grant it only inside a booked maintenance window with
+      a filed change plan.
+    quiet: true
+  when:
+    - dell_host_baseline_apply_firmware | bool
+    - dell_host_baseline_firmware_targets | selectattr('requires_reboot', 'defined') | selectattr('requires_reboot') | list | length > 0
+
+- name: Assert offline mode is never combined with any apply gate
+  ansible.builtin.assert:
+    that:
+      - not (dell_host_baseline_apply | bool)
+      - not (dell_host_baseline_apply_firmware | bool)
+      - not (dell_host_baseline_apply_idrac | bool)
+      - not (dell_host_baseline_apply_storage | bool)
+    fail_msg: >-
+      dell_host_baseline_offline=true is a CI/test affordance that suppresses
+      all remote iDRAC calls. It must never be combined with an apply gate.
+      Remove dell_host_baseline_offline or remove the apply gate.
+    quiet: true
+  when: dell_host_baseline_offline | bool
+
+- name: Resolve out-of-band credentials from the environment
+  ansible.builtin.set_fact:
+    dell_host_baseline_oob_username: "{{ lookup('ansible.builtin.env', oob_controller.username_var) }}"
+    dell_host_baseline_oob_password: "{{ lookup('ansible.builtin.env', oob_controller.password_var) }}"
+  no_log: true
+  when: not (dell_host_baseline_offline | bool)
+
+- name: Fail when out-of-band credentials are missing
+  ansible.builtin.assert:
+    that:
+      - dell_host_baseline_oob_username | length > 0
+      - dell_host_baseline_oob_password | length > 0
+    fail_msg: >-
+      Export {{ oob_controller.username_var }} and {{ oob_controller.password_var }}
+      before running. Credentials are never read from inventory.
+    quiet: true
+  no_log: true
+  when: not (dell_host_baseline_offline | bool)
+
+# ---------------------------------------------------------------------------
+# 2. Facts (read-only, TLS-verified). idrac_firmware_info returns
+#    firmware_info as a DICT with a 'Firmware' LIST of component entries
+#    (audited: plugins/modules/idrac_firmware_info.py RETURN sample).
+# ---------------------------------------------------------------------------
+- name: Gather iDRAC firmware inventory
+  dellemc.openmanage.idrac_firmware_info:
+    idrac_ip: "{{ oob_controller.address }}"
+    idrac_user: "{{ dell_host_baseline_oob_username }}"
+    idrac_password: "{{ dell_host_baseline_oob_password }}"
+    validate_certs: true
+    ca_path: "{{ dell_host_baseline_idrac_ca_path }}"
+    timeout: "{{ dell_host_baseline_idrac_timeout }}"
+  register: dell_host_baseline_idrac_firmware_info
+  delegate_to: localhost
+  changed_when: false
+  check_mode: false
+  when: not (dell_host_baseline_offline | bool)
+
+- name: Build discovered firmware version map (remote)
+  ansible.builtin.set_fact:
+    dell_host_baseline_firmware_actual: >-
+      {{ dict((dell_host_baseline_idrac_firmware_info.firmware_info.Firmware | default([]))
+              | map(attribute='ElementName') | list
+              | zip((dell_host_baseline_idrac_firmware_info.firmware_info.Firmware | default([]))
+                    | map(attribute='Version') | list)) }}
+  when: not (dell_host_baseline_offline | bool)
+
+- name: Build discovered firmware version map (offline fixture)
+  ansible.builtin.set_fact:
+    dell_host_baseline_firmware_actual: "{{ dell_host_baseline_fixture_firmware }}"
+  when: dell_host_baseline_offline | bool
+
+# ---------------------------------------------------------------------------
+# 3. Firmware drift report (always read-only)
+# ---------------------------------------------------------------------------
+- name: Build firmware drift list
+  ansible.builtin.set_fact:
+    dell_host_baseline_firmware_drift: >-
+      {{ dell_host_baseline_firmware_drift | default([]) + [{
+           'component': item.component,
+           'target': item.target_version,
+           'actual': dell_host_baseline_firmware_actual.get(item.component, 'unknown'),
+           'floor': item.current_version_floor,
+           'requires_reboot': item.requires_reboot | default(false),
+           'recovery': item.recovery,
+           'drifted': dell_host_baseline_firmware_actual.get(item.component, 'unknown') != item.target_version
+         }] }}
+  loop: "{{ dell_host_baseline_firmware_targets }}"
+  loop_control:
+    label: "{{ item.component }}"
+
+- name: Report firmware drift
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} ({{ asset_id }}) firmware drift:
+      {{ dell_host_baseline_firmware_drift | selectattr('drifted') | list | length }}
+      of {{ dell_host_baseline_firmware_drift | length }} components differ from baseline.
+  changed_when: false
+
+# ---------------------------------------------------------------------------
+# 4. Firmware apply (gated: apply + apply_firmware + hardware_validated + drift)
+# ---------------------------------------------------------------------------
+- name: Apply firmware baseline
+  ansible.builtin.include_tasks: firmware.yml
+  when:
+    - dell_host_baseline_apply | bool
+    - dell_host_baseline_apply_firmware | bool
+    - dell_host_baseline_hardware_validated | bool
+    - dell_host_baseline_firmware_drift | selectattr('drifted') | list | length > 0
+
+# ---------------------------------------------------------------------------
+# 5. iDRAC settings baseline (gated: apply + apply_idrac)
+# ---------------------------------------------------------------------------
+- name: Apply iDRAC settings baseline
+  ansible.builtin.include_tasks: idrac.yml
+  when:
+    - dell_host_baseline_apply | bool
+    - dell_host_baseline_apply_idrac | bool
+
+# ---------------------------------------------------------------------------
+# 6. Host OS baseline (packages, sysctl, services)
+# ---------------------------------------------------------------------------
+- name: Ensure required packages are present
+  ansible.builtin.package:
+    name: "{{ dell_host_baseline_host_os.packages_present }}"
+    state: present
+  become: true
+  when: dell_host_baseline_apply | bool
+  notify: reload systemd
+
+- name: Ensure forbidden packages are absent
+  ansible.builtin.package:
+    name: "{{ dell_host_baseline_host_os.packages_absent }}"
+    state: absent
+  become: true
+  when: dell_host_baseline_apply | bool
+
+- name: Apply sysctl hardening baseline
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_set: true
+    sysctl_file: /etc/sysctl.d/99-custos-arcae.conf
+    state: present
+    reload: false
+  become: true
+  loop: "{{ dell_host_baseline_host_os.sysctl | dict2items }}"
+  when: dell_host_baseline_apply | bool
+  notify: apply sysctl
+
+- name: Ensure time synchronisation service is enabled and running
+  ansible.builtin.service:
+    name: "{{ dell_host_baseline_time_service | default('ntpsec') }}"
+    state: started
+    enabled: true
+  become: true
+  when: dell_host_baseline_apply | bool
+
+# ---------------------------------------------------------------------------
+# 7. Storage verification (read-only) and apply (quadruple-gated)
+# ---------------------------------------------------------------------------
+- name: Verify storage layout against inventory
+  ansible.builtin.include_tasks: storage.yml
+
+# ---------------------------------------------------------------------------
+# 8. Post-activation verification + audit
+# ---------------------------------------------------------------------------
+- name: Re-gather firmware inventory after activation
+  dellemc.openmanage.idrac_firmware_info:
+    idrac_ip: "{{ oob_controller.address }}"
+    idrac_user: "{{ dell_host_baseline_oob_username }}"
+    idrac_password: "{{ dell_host_baseline_oob_password }}"
+    validate_certs: true
+    ca_path: "{{ dell_host_baseline_idrac_ca_path }}"
+    timeout: "{{ dell_host_baseline_idrac_timeout }}"
+  register: dell_host_baseline_idrac_firmware_info_post
+  delegate_to: localhost
+  changed_when: false
+  check_mode: false
+  when:
+    - dell_host_baseline_apply | bool
+    - dell_host_baseline_apply_firmware | bool
+    - not (dell_host_baseline_offline | bool)
+
+- name: Verify actual firmware versions match the baseline after activation
+  ansible.builtin.assert:
+    that:
+      - (dell_host_baseline_idrac_firmware_info_post.firmware_info.Firmware | default([]))
+        | selectattr('ElementName', 'equalto', item.component)
+        | map(attribute='Version') | first | default('unknown') == item.target_version
+    fail_msg: >-
+      Post-activation verification failed for {{ item.component }} on
+      {{ inventory_hostname }} ({{ asset_id }}): expected
+      {{ item.target_version }}, found
+      {{ (dell_host_baseline_idrac_firmware_info_post.firmware_info.Firmware
+         | default([]))
+         | selectattr('ElementName', 'equalto', item.component)
+         | map(attribute='Version') | first | default('unknown') }}.
+      Do NOT record success. Follow the component recovery procedure:
+      {{ item.recovery }}.
+    quiet: true
+  loop: "{{ dell_host_baseline_firmware_targets }}"
+  loop_control:
+    label: "{{ item.component }}"
+  when:
+    - dell_host_baseline_apply | bool
+    - dell_host_baseline_apply_firmware | bool
+
+# The completion audit event MUST reflect what the device reports AFTER
+# activation, never the pre-update drift computed in §3. Reporting the stale
+# §3 map could record a "complete" event whose firmware_drift came from the
+# observation taken before the update was submitted.
+- name: Build discovered firmware version map from the post-activation observation
+  ansible.builtin.set_fact:
+    dell_host_baseline_firmware_actual_post: >-
+      {{ dict((dell_host_baseline_idrac_firmware_info_post.firmware_info.Firmware | default([]))
+              | map(attribute='ElementName') | list
+              | zip((dell_host_baseline_idrac_firmware_info_post.firmware_info.Firmware | default([]))
+                    | map(attribute='Version') | list)) }}
+  when:
+    - dell_host_baseline_apply | bool
+    - dell_host_baseline_apply_firmware | bool
+    - not (dell_host_baseline_offline | bool)
+
+- name: Rebuild firmware drift from the FRESH post-activation observation
+  ansible.builtin.set_fact:
+    dell_host_baseline_firmware_drift_post: >-
+      {{ dell_host_baseline_firmware_drift_post | default([]) + [{
+           'component': item.component,
+           'target': item.target_version,
+           'actual': dell_host_baseline_firmware_actual_post.get(item.component, 'unknown'),
+           'drifted': dell_host_baseline_firmware_actual_post.get(item.component, 'unknown') != item.target_version
+         }] }}
+  loop: "{{ dell_host_baseline_firmware_targets }}"
+  loop_control:
+    label: "{{ item.component }}"
+  when:
+    - dell_host_baseline_apply | bool
+    - dell_host_baseline_apply_firmware | bool
+    - not (dell_host_baseline_offline | bool)
+
+- name: Write baseline completion event to the audit log
+  ansible.builtin.lineinfile:
+    path: "{{ dell_host_baseline_audit_log_path }}"
+    # Build a dict and pipe through to_json so the emitted line is guaranteed
+    # valid JSON. A folded JSON-literal string is coerced to a Python dict by
+    # the templar and written as single-quoted repr, corrupting the JSONL log.
+    line: >-
+      {{ {
+        'ts': ansible_date_time.iso8601,
+        'event': 'dell_host_baseline.complete',
+        'source': dell_host_baseline_audit_event_source,
+        'environment': custos_environment,
+        'site': custos_site,
+        'asset_id': asset_id,
+        'host': inventory_hostname,
+        'role_version': dell_host_baseline_role_version,
+        'apply': dell_host_baseline_apply | bool,
+        'apply_firmware': dell_host_baseline_apply_firmware | bool,
+        'apply_idrac': dell_host_baseline_apply_idrac | bool,
+        'apply_storage': dell_host_baseline_apply_storage | bool,
+        'hardware_validated': dell_host_baseline_hardware_validated | bool,
+        'firmware_drift_source': ('post-activation'
+          if dell_host_baseline_firmware_drift_post is defined
+          else 'pre-update-observation'),
+        'firmware_drift': (dell_host_baseline_firmware_drift_post
+          if dell_host_baseline_firmware_drift_post is defined
+          else dell_host_baseline_firmware_drift)
+          | selectattr('drifted') | list | length,
+        'change_plan': custos_change_plan | default('none')
+      } | to_json }}
+    create: true
+    mode: "0640"
+  # Offline (CI fixture) runs write to a caller-owned path with no privilege
+  # escalation; real runs escalate to write under /var/log.
+  become: "{{ not (dell_host_baseline_offline | bool) }}"
+  delegate_to: localhost
+  changed_when: true

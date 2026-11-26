@@ -1,0 +1,41 @@
+# yamllint configuration for custos-arcae-control.
+#
+# Ansible YAML has a few conventions (long lines in tasks, octal-safe file
+# modes, truthy booleans) that plain yamllint dislikes. Relaxations below are
+# the minimum required to lint Ansible content without hiding real problems.
+
+extends: default
+
+ignore: |
+  .venv/
+  .git/
+  .mypy_cache/
+  .pytest_cache/
+  .ruff_cache/
+  **/*.egg-info/
+
+rules:
+  line-length:
+    max: 140
+    level: warning
+  indentation:
+    spaces: 2
+    indent-sequences: consistent
+  comments:
+    min-spaces-from-content: 1
+  truthy:
+    # Ansible accepts yes/no for booleans in some modules; we still require
+    # true/false in new code but do not fail the build on legacy values.
+    allowed-values: ["true", "false", "yes", "no"]
+    check-keys: false
+  document-start:
+    present: false
+  braces:
+    max-spaces-inside: 1
+  brackets:
+    max-spaces-inside: 1
+  empty-lines:
+    max: 2
+  key-duplicates: enable
+  new-line-at-end-of-file: enable
+  trailing-spaces: enable

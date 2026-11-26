@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SYNTHETIC fixture: an EMPTY catalogue (zero SoftwareComponent entries).
+     The verification script must reject it: an empty repository would let the
+     iDRAC consume nothing (or, worse, an ambiguous "no updates" success). -->
+<Manifest>
+  <Release>
+    <Name><Display lang="en">Empty catalogue fixture</Display></Name>
+    <Version><Display>0.0</Display></Version>
+  </Release>
+</Manifest>

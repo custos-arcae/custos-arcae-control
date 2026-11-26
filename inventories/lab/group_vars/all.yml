@@ -1,0 +1,70 @@
+# Lab-wide variables for custos-arcae-control.
+#
+# Applies to every host in inventories/lab/hosts.yml. Site-specific values for
+# production live in inventories/production/<country>/<site-id>/group_vars/all.yml
+# (country-first layout, ADR-0003) and are reviewed under a stricter CODEOWNERS
+# rule.
+#
+# Compliance notes
+# ----------------
+# * No secret material is stored here. Passwords, tokens and keys are resolved
+#   at run time from environment variables or an external secret store.
+# * No personal data. Ownership is expressed as team/role.
+
+---
+# --- Environment identity ----------------------------------------------------
+custos_environment: lab
+custos_site: lab-01
+
+# --- Ansible connection defaults --------------------------------------------
+ansible_user: "{{ lookup('ansible.builtin.env', 'CUSTOS_LAB_SSH_USER') | default('custos-lab', true) }}"
+ansible_ssh_common_args: >-
+  -o IdentitiesOnly=yes
+  -o StrictHostKeyChecking=yes
+  -o UserKnownHostsFile={{ playbook_dir }}/../../.ssh-known-hosts/lab
+  -o ConnectTimeout=10
+ansible_python_interpreter: /usr/bin/python3
+
+# Fail fast rather than silently skipping unreachable hosts. In lab an
+# unreachable host is almost always a bug in the inventory or a missing
+# simulator, not a transient condition.
+ansible_ssh_pipelining: false
+ansible_transport: ssh
+
+# --- Time & locale -----------------------------------------------------------
+custos_timezone: Europe/Vilnius
+custos_ntp_servers:
+  # Public NTP pool aliases. Lab does not require authenticated time.
+  - 0.lt.pool.ntp.org
+  - 1.lt.pool.ntp.org
+  - 2.lt.pool.ntp.org
+  - 3.lt.pool.ntp.org
+
+# --- Baseline behaviour switches --------------------------------------------
+# Reboots are opt-in everywhere. A role that would reboot must consult the
+# matching `*_allow_reboot` variable and skip if it is false.
+dell_host_baseline_allow_reboot: false
+proxmox_ve_allow_reboot: false
+management_network_allow_reboot: false
+switch_baseline_allow_reload: false
+
+# Dry-run mode. When true, roles must not mutate state even if Ansible is
+# invoked without --check. Used by CI to validate logic paths that would
+# otherwise require a real device.
+custos_dry_run: false
+
+# --- Audit -------------------------------------------------------------------
+# Every role writes a structured event here before and after mutating a
+# device. Lab events are kept for 30 days; production events are shipped to
+# the SIEM (see docs/adr/0002 when it is written).
+custos_audit_log_path: /var/log/custos-arcae/lab-audit.jsonl
+custos_audit_event_source: custos-arcae-control
+custos_audit_retention_days: 30
+
+# --- Out-of-band credential indirection -------------------------------------
+# Roles must reference these variable names, never the values. The values are
+# injected from the operator's environment at run time. Naming convention is
+# CUSTOS_<ENV>_IDRAC_USER / CUSTOS_<ENV>_IDRAC_PASS (see AGENTS.md and the
+# runbook). The previous COSTOS_* spelling was a typo and is not used.
+custos_oob_username_var: CUSTOS_LAB_IDRAC_USER
+custos_oob_password_var: CUSTOS_LAB_IDRAC_PASS  # pragma: allowlist secret (env-var NAME, not a value; requires CODEOWNER approval)

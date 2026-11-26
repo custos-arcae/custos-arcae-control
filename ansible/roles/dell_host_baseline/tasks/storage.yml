@@ -1,0 +1,193 @@
+# ansible/roles/dell_host_baseline/tasks/storage.yml
+#
+# Storage layout verification and (quadruple-gated) apply.
+#
+# Default behaviour is VERIFY ONLY: compare the actual virtual-disk layout
+# reported by iDRAC against the expected layout in inventory and report drift.
+# No mutation occurs.
+#
+# To mutate RAID you must set ALL of:
+#   dell_host_baseline_apply                          = true
+#   dell_host_baseline_hardware_validated             = true
+#   dell_host_baseline_apply_storage                  = true
+#   dell_host_baseline_storage_disks_confirmed_empty  = true
+#
+# The disks-confirmed-empty flag is an operator attestation that the target
+# disks hold no data. It exists because RAID reconfiguration is destructive and
+# there is no programmatic way to prove a disk is safe to wipe. Hardware
+# validation is required because exact PERC support, drive IDs and the recovery
+# procedure are model-specific (see runbook §"Hardware validation required").
+#
+# API CONTRACT (audited against dellemc.openmanage==9.7.0 idrac_storage_volume):
+#   * RAID level param is `volume_type`, SPACED values: 'RAID 0','RAID 1',
+#     'RAID 5','RAID 6','RAID 10','RAID 50','RAID 60'. There is NO `raid_type`.
+#   * Disks are selected via the `volumes` list. Each volume entry supports:
+#     name, drives{id:[...]} or drives{location:[...]}, volume_type,
+#     span_length, span_depth, number_dedicated_hot_spare, disk_cache_policy,
+#     write_cache_policy, read_cache_policy, stripe_size, capacity,
+#     raid_init_operation. There is NO top-level `drive_list` and NO
+#     `volume_name` param.
+#   * Drive IDs look like "Disk.Bay.1:Enclosure.Internal.0-1:RAID.Slot.1-1".
+#   * `state: view` returns `storage_status` (a dict), not a list of vdisks.
+#   * `controller_id` looks like "RAID.Slot.1-1".
+#
+# EXPECTED INVENTORY SHAPE (host_vars storage.boot / storage.data):
+#   controller_id: "RAID.Slot.1-1"
+#   volume_type:   "RAID 1"            # spaced, from the audited choices
+#   name:          "custos-boot"
+#   capacity_gb:   960                 # optional; volume capacity in GB
+#   drives:
+#     id: ["Disk.Bay.1:Enclosure.Internal.0-1:RAID.Slot.1-1",
+#          "Disk.Bay.2:Enclosure.Internal.0-1:RAID.Slot.1-1"]
+
+---
+- name: Read expected storage layout from inventory
+  ansible.builtin.set_fact:
+    dell_host_baseline_storage_expected:
+      boot: "{{ storage.boot | default(omit) }}"
+      data: "{{ storage.data | default(omit) }}"
+
+- name: Assert expected storage layout uses the audited 9.7.0 contract
+  ansible.builtin.assert:
+    that:
+      - item.value.controller_id is defined and item.value.controller_id | length > 0
+      - item.value.volume_type is defined
+      - item.value.volume_type in ['RAID 0', 'RAID 1', 'RAID 5', 'RAID 6', 'RAID 10', 'RAID 50', 'RAID 60']
+      - item.value.drives is defined
+      - (item.value.drives.id | default([])) | length > 0 or
+        (item.value.drives.location | default([])) | length > 0
+    fail_msg: >-
+      storage.{{ item.key }} on {{ inventory_hostname }} ({{ asset_id }}) does
+      not match the idrac_storage_volume 9.7.0 contract. Required:
+      controller_id, volume_type (one of 'RAID 0/1/5/6/10/50/60' WITH a space),
+      and drives.id or drives.location with exact drive identifiers. Legacy
+      keys raid_type/drive_list/volume_name are not valid module parameters.
+    quiet: true
+  loop: "{{ dell_host_baseline_storage_expected | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: item.value is defined
+
+- name: Gather the current virtual-disk layout from iDRAC (read-only)
+  dellemc.openmanage.idrac_storage_volume:
+    idrac_ip: "{{ oob_controller.address }}"
+    idrac_user: "{{ dell_host_baseline_oob_username }}"
+    idrac_password: "{{ dell_host_baseline_oob_password }}"
+    validate_certs: true
+    ca_path: "{{ dell_host_baseline_idrac_ca_path }}"
+    timeout: "{{ dell_host_baseline_idrac_timeout }}"
+    state: view
+    controller_id: "{{ item.value.controller_id }}"
+  loop: "{{ dell_host_baseline_storage_expected | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value is defined
+    - not (dell_host_baseline_offline | bool)
+  delegate_to: localhost
+  register: dell_host_baseline_storage_view
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Report the discovered storage layout
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} ({{ asset_id }}) storage view:
+      expected={{ dell_host_baseline_storage_expected }};
+      actual_storage_status={{ dell_host_baseline_storage_view.results | default([]) | map(attribute='storage_status') | list
+      if not (dell_host_baseline_offline | bool) else dell_host_baseline_fixture_storage }}.
+      Field-level drift comparison requires the view return structure to be
+      confirmed against the target PERC in lab; until then this task reports
+      the raw layout for the operator to compare.
+  changed_when: false
+
+- name: Block storage apply until hardware validation is recorded
+  ansible.builtin.fail:
+    msg: >-
+      Storage apply was requested (dell_host_baseline_apply_storage=true) but
+      dell_host_baseline_hardware_validated is false. RAID mutation is
+      destructive and model-specific. Complete the lab hardware-validation test
+      in docs/runbooks/commission-dell-host.md §"Hardware validation required"
+      (supported PERC, exact drive IDs, occupied-disk check, recovery
+      procedure) and set dell_host_baseline_hardware_validated=true in the
+      site inventory before retrying.
+  when:
+    - dell_host_baseline_apply_storage | bool
+    - not (dell_host_baseline_hardware_validated | bool)
+
+- name: Occupied-disk safety check before any RAID mutation
+  ansible.builtin.assert:
+    that:
+      - dell_host_baseline_storage_disks_confirmed_empty | bool
+    fail_msg: >-
+      Refusing to reconfigure RAID without the operator attestation that the
+      target drives hold no data
+      (dell_host_baseline_storage_disks_confirmed_empty=true). The view output
+      above must also be inspected manually: any drive that is currently a
+      member of a virtual disk with data must be excluded. This check cannot be
+      fully automated offline and is a mandatory hardware-validation step.
+    quiet: true
+  when:
+    - dell_host_baseline_apply_storage | bool
+    - dell_host_baseline_hardware_validated | bool
+
+- name: Create the expected virtual disks (destructive, quadruple-gated)
+  dellemc.openmanage.idrac_storage_volume:
+    idrac_ip: "{{ oob_controller.address }}"
+    idrac_user: "{{ dell_host_baseline_oob_username }}"
+    idrac_password: "{{ dell_host_baseline_oob_password }}"
+    validate_certs: true
+    ca_path: "{{ dell_host_baseline_idrac_ca_path }}"
+    timeout: "{{ dell_host_baseline_idrac_timeout }}"
+    state: create
+    controller_id: "{{ item.value.controller_id }}"
+    volume_type: "{{ item.value.volume_type }}"
+    raid_reset_config: "{{ item.value.raid_reset_config | default('false') }}"
+    job_wait: true
+    volumes:
+      - name: "{{ item.value.name | default('custos-' ~ item.key) }}"
+        drives: "{{ item.value.drives }}"
+        volume_type: "{{ item.value.volume_type }}"
+        capacity: "{{ item.value.capacity_gb | default(omit, true) }}"
+        span_length: "{{ item.value.span_length | default(omit, true) }}"
+        span_depth: "{{ item.value.span_depth | default(omit, true) }}"
+        number_dedicated_hot_spare: "{{ item.value.number_dedicated_hot_spare | default(0) }}"
+        disk_cache_policy: "{{ item.value.disk_cache_policy | default('Default') }}"
+        write_cache_policy: "{{ item.value.write_cache_policy | default('WriteThrough') }}"
+        read_cache_policy: "{{ item.value.read_cache_policy | default('NoReadAhead') }}"
+        stripe_size: "{{ item.value.stripe_size | default(65536) }}"
+        raid_init_operation: "{{ item.value.raid_init_operation | default('None') }}"
+  loop: "{{ dell_host_baseline_storage_expected | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - dell_host_baseline_apply | bool
+    - dell_host_baseline_hardware_validated | bool
+    - dell_host_baseline_apply_storage | bool
+    - dell_host_baseline_storage_disks_confirmed_empty | bool
+    - item.value is defined
+  delegate_to: localhost
+  register: dell_host_baseline_storage_apply
+  no_log: true
+
+- name: Fail if any storage create job did not succeed
+  ansible.builtin.assert:
+    that:
+      - (dell_host_baseline_storage_apply.results | selectattr('failed', 'defined') | selectattr('failed') | list) | length == 0
+    fail_msg: >-
+      Storage reconfiguration failed on {{ inventory_hostname }} ({{ asset_id }}).
+      Stop. Capture the LifecycleController log and the PERC controller state
+      before any retry. A partial RAID rebuild may be in progress; do not
+      power-cycle the host until the controller reports the rebuild state.
+    quiet: true
+  # Only meaningful when the create task actually ran. A skipped loop register
+  # still exposes `.results` whose items have no `failed` key, so gate on the
+  # same quadruple condition as the create task, not just on `.results`.
+  when:
+    - dell_host_baseline_apply | bool
+    - dell_host_baseline_hardware_validated | bool
+    - dell_host_baseline_apply_storage | bool
+    - dell_host_baseline_storage_disks_confirmed_empty | bool
+    - dell_host_baseline_storage_apply is defined
+    - dell_host_baseline_storage_apply.results is defined

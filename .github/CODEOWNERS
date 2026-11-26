@@ -56,8 +56,8 @@
 # settings, not by this line alone. See AGENTS.md §5.1. An administrator must
 # confirm these team slugs exist and have write access before enabling
 # protection; until then production stays disabled.
-/inventories/production/                @custos-arcae/platform-leads @custos-arcae/security-reviewers @custos-arcae/site-lt-vilnius
-/inventories/production/lt-vilnius-01/  @custos-arcae/platform-leads @custos-arcae/security-reviewers @custos-arcae/site-lt-vilnius
+/inventories/production/                  @custos-arcae/platform-leads @custos-arcae/security-reviewers @custos-arcae/site-lt-vilnius
+/inventories/production/lt/lt-vilnius-01/  @custos-arcae/platform-leads @custos-arcae/security-reviewers @custos-arcae/site-lt-vilnius
 
 # --- Docs --------------------------------------------------------------------
 /docs/adr/                              @custos-arcae/platform-leads @custos-arcae/security-reviewers

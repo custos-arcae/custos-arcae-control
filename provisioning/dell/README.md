@@ -109,8 +109,9 @@ as the change plan.
 
 ## Disk preparation
 
-RAID layout is declared in inventory (`host_vars/<asset-id>.yml` under
-`storage.boot` and `storage.data`). This directory holds the **rules** for
+RAID layout is declared in inventory (`host_vars/<inventory-hostname>.yml`
+under `storage.boot` and `storage.data`; file name is the inventory hostname,
+per ADR-0003). This directory holds the **rules** for
 choosing a layout:
 
 - Boot volume: RAID 1, two disks, minimum 480 GiB each. Survives a single

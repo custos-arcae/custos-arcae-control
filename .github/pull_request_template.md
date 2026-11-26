@@ -47,7 +47,7 @@ justification. See AGENTS.md for the review contract.
 <!-- How will the executor prove the change worked? Cite the runbook section
 and paste the expected evidence. -->
 
-- Target environment: <!-- lab | production/lt-vilnius-01 -->
+- Target environment: <!-- lab | production/lt/lt-vilnius-01 (country-first, ADR-0003) -->
 - Target devices: <!-- asset IDs or hostnames; never invent values -->
 - Success criteria:
 - Evidence to capture (logs, command output, screenshots of console, etc.):
